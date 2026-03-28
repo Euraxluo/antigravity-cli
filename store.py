@@ -324,7 +324,13 @@ class AntigravitySessionStore:
             return conn
 
         try:
-            subprocess.run(["open", "-a", "Antigravity"], check=False)
+            subprocess.run(
+                ["antigravity", "chat", "-m", "ask", "你好"],
+                cwd=str(self.repo_root),
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         except Exception:
             pass
 
@@ -337,15 +343,14 @@ class AntigravitySessionStore:
         return conn
 
     def _launch_antigravity_for_session(self, session_id: str) -> None:
-        workspace = self.session_workspace_path(session_id)
         try:
-            if workspace:
-                subprocess.run(
-                    ["osascript", "-e", f'tell application "Antigravity" to open POSIX file "{workspace}"'],
-                    check=False,
-                )
-            else:
-                subprocess.run(["open", "-a", "Antigravity"], check=False)
+            subprocess.run(
+                ["antigravity", "chat", "-m", "ask", "你好"],
+                cwd=str(self.repo_root),
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         except Exception:
             pass
 
