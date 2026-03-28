@@ -8,6 +8,7 @@ import json
 import re
 import ssl
 import subprocess
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -50,6 +51,9 @@ class AntigravitySessionStore:
         brain_dir: Optional[Path] = None,
     ) -> None:
         home = Path.home()
+        self.repo_root = Path(__file__).resolve().parent
+        self.cache_root = self.repo_root / ".cache"
+        self.cache_root.mkdir(parents=True, exist_ok=True)
         self.conversations_dir = conversations_dir or home / ".gemini" / "antigravity" / "conversations"
         self.brain_dir = brain_dir or home / ".gemini" / "antigravity" / "brain"
 
@@ -71,6 +75,37 @@ class AntigravitySessionStore:
                 )
             )
         return [asdict(item) for item in sessions]
+
+    def session_workspace_path(self, session_id: str) -> Optional[str]:
+        # 1. Try to infer from transcript cache.
+        messages = self.get_session_messages(session_id)
+        for msg in messages:
+            content = str(msg.get("content") or "")
+            for line in content.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("@[/") and "]" in stripped:
+                    candidate = stripped[2:].split("]", 1)[0]
+                    p = Path(candidate)
+                    if p.exists():
+                        return str(p.parent if p.is_file() else p)
+                if stripped.startswith("/Users/echo/"):
+                    p = Path(stripped)
+                    if p.exists():
+                        return str(p if p.is_dir() else p.parent)
+
+        # 2. Try to infer from text artifacts.
+        session_dir = self.brain_dir / session_id
+        for name in ("task.md", "implementation_plan.md", "walkthrough.md"):
+            path = session_dir / name
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            for match in re.findall(r"/Users/echo/[^\s)`'\"<>]+", text):
+                p = Path(match)
+                if p.exists():
+                    return str(p if p.is_dir() else p.parent)
+
+        return None
 
     def list_session_files(self, session_id: str) -> List[Dict[str, Any]]:
         session_dir = self.brain_dir / session_id
@@ -225,7 +260,7 @@ class AntigravitySessionStore:
         return "text"
 
     def _live_cache_dir(self, session_id: str) -> Path:
-        path = self.brain_dir / session_id / ".live-cache"
+        path = self.cache_root / session_id
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -283,8 +318,43 @@ class AntigravitySessionStore:
             "ports": sorted(set(ports)),
         }
 
-    def _live_ls_rpc(self, method: str, payload: Dict[str, Any]) -> Any:
+    def _ensure_live_ls_connection(self, wait_seconds: float = 12.0) -> Dict[str, Any]:
         conn = self._discover_live_ls_connection()
+        if not conn.get("error"):
+            return conn
+
+        try:
+            subprocess.run(["open", "-a", "Antigravity"], check=False)
+        except Exception:
+            pass
+
+        deadline = time.time() + wait_seconds
+        while time.time() < deadline:
+            conn = self._discover_live_ls_connection()
+            if not conn.get("error"):
+                return conn
+            time.sleep(1.0)
+        return conn
+
+    def _launch_antigravity_for_session(self, session_id: str) -> None:
+        workspace = self.session_workspace_path(session_id)
+        try:
+            if workspace:
+                subprocess.run(
+                    ["osascript", "-e", f'tell application "Antigravity" to open POSIX file "{workspace}"'],
+                    check=False,
+                )
+            else:
+                subprocess.run(["open", "-a", "Antigravity"], check=False)
+        except Exception:
+            pass
+
+    def _live_ls_rpc(self, method: str, payload: Dict[str, Any]) -> Any:
+        session_id = payload.get("cascadeId")
+        conn = self._ensure_live_ls_connection()
+        if conn.get("error") and isinstance(session_id, str):
+            self._launch_antigravity_for_session(session_id)
+            conn = self._ensure_live_ls_connection(wait_seconds=20.0)
         if conn.get("error"):
             return conn
 
