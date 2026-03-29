@@ -3,17 +3,26 @@
 from __future__ import annotations
 
 import datetime as dt
+import io
 import mimetypes
 import json
 import re
 import ssl
 import subprocess
+import sys
 import time
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, BinaryIO, Dict, List, Optional, Sequence
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from runtime_cli.ag_runtime import AnswerCollector, RuntimeLocator, RuntimeRpcClient
 
 
 @dataclass
@@ -24,6 +33,7 @@ class SessionSummary:
     updated_local: str
     file_count: int
     has_messages: bool
+    workspace_path: Optional[str] = None
 
 
 @dataclass
@@ -42,6 +52,8 @@ class ChatMessage:
     content: str
     created_at: str
     step_index: Optional[int]
+    thought: Optional[str] = None
+    attachments: Optional[List[Dict[str, str]]] = None
 
 
 class AntigravitySessionStore:
@@ -57,13 +69,98 @@ class AntigravitySessionStore:
         self.conversations_dir = conversations_dir or home / ".gemini" / "antigravity" / "conversations"
         self.brain_dir = brain_dir or home / ".gemini" / "antigravity" / "brain"
 
+    def get_session_summary(self, session_id: str, fallback_title: Optional[str] = None) -> Dict[str, Any]:
+        pb_path = self.conversations_dir / f"{session_id}.pb"
+        if pb_path.exists():
+            updated = dt.datetime.fromtimestamp(pb_path.stat().st_mtime, tz=dt.timezone.utc)
+        else:
+            updated = dt.datetime.now(dt.timezone.utc)
+
+        title = self._session_title(session_id)
+        if title == session_id and fallback_title:
+            title = fallback_title.strip()[:80] or session_id
+
+        return asdict(
+            SessionSummary(
+                id=session_id,
+                title=title,
+                updated_at=updated.isoformat(),
+                updated_local=updated.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+                file_count=len(self.list_session_files(session_id)),
+                has_messages=self._messages_cache_path(session_id).exists(),
+                workspace_path=self.session_workspace_path(session_id),
+            )
+        )
+
+    def send_message(
+        self,
+        message: str,
+        *,
+        session_id: Optional[str] = None,
+        timeout: float = 60.0,
+        idle_seconds: float = 1.5,
+        poll: float = 0.5,
+        model: int = 1018,
+        attachment_paths: Optional[Sequence[Path]] = None,
+    ) -> Dict[str, Any]:
+        prompt = (message or "").strip()
+        paths = list(attachment_paths or [])
+        if not prompt and not paths:
+            raise ValueError("message or attachment is required")
+
+        locator = RuntimeLocator(self.repo_root)
+        connection = locator.discover()
+        client = RuntimeRpcClient(connection)
+        stream = io.StringIO()
+        collector = AnswerCollector(
+            client,
+            poll_interval=poll,
+            idle_seconds=idle_seconds,
+            timeout=timeout,
+            stdout=stream,
+        )
+
+        created = session_id is None
+        if created:
+            session_id = client.start_cascade()
+
+        assert session_id is not None
+        baseline = collector.capture_baseline(session_id)
+        client.send_user_message(session_id, prompt, model=model, attachment_paths=paths)
+        answer = collector.collect(session_id, baseline_step_count=baseline).strip()
+        messages = self.get_session_messages(session_id, force_refresh=True)
+
+        return {
+            "session_id": session_id,
+            "created": created,
+            "answer": answer,
+            "messages": messages,
+            "session": self.get_session_summary(session_id, fallback_title=prompt),
+        }
+
+    def save_uploaded_file(self, filename: str, fileobj: BinaryIO) -> Path:
+        safe_name = Path(filename or "upload.bin").name or "upload.bin"
+        upload_dir = self.cache_root / "_uploads" / dt.datetime.now().strftime("%Y%m%d")
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        target = upload_dir / f"{int(time.time() * 1000)}_{safe_name}"
+        with target.open("wb") as f:
+            while True:
+                chunk = fileobj.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+        return target
+
     def list_sessions(self) -> List[Dict[str, Any]]:
+        session_ids: set[str] = set()
         sessions: List[SessionSummary] = []
+        workspace_map = self._live_workspace_map()
+
         for pb in sorted(self.conversations_dir.glob("*.pb"), key=lambda p: p.stat().st_mtime, reverse=True):
             session_id = pb.stem
-            session_dir = self.brain_dir / session_id
-            updated = dt.datetime.fromtimestamp(pb.stat().st_mtime, tz=dt.timezone.utc)
+            session_ids.add(session_id)
             files = self.list_session_files(session_id)
+            updated = dt.datetime.fromtimestamp(pb.stat().st_mtime, tz=dt.timezone.utc)
             sessions.append(
                 SessionSummary(
                     id=session_id,
@@ -72,11 +169,36 @@ class AntigravitySessionStore:
                     updated_local=updated.astimezone().strftime("%Y-%m-%d %H:%M:%S"),
                     file_count=len(files),
                     has_messages=self._messages_cache_path(session_id).exists(),
+                    workspace_path=workspace_map.get(session_id) or self.session_workspace_path(session_id),
                 )
             )
+
+        for cache_dir in sorted(self.cache_root.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+            if not cache_dir.is_dir():
+                continue
+            session_id = cache_dir.name
+            if session_id in session_ids:
+                continue
+            sessions.append(
+                SessionSummary(
+                    id=session_id,
+                    title=self._session_title(session_id),
+                    updated_at=dt.datetime.fromtimestamp(cache_dir.stat().st_mtime, tz=dt.timezone.utc).isoformat(),
+                    updated_local=dt.datetime.fromtimestamp(cache_dir.stat().st_mtime, tz=dt.timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S"),
+                    file_count=len(self.list_session_files(session_id)),
+                    has_messages=self._messages_cache_path(session_id).exists(),
+                    workspace_path=workspace_map.get(session_id) or self.session_workspace_path(session_id),
+                )
+            )
+
+        sessions.sort(key=lambda item: item.updated_at, reverse=True)
         return [asdict(item) for item in sessions]
 
     def session_workspace_path(self, session_id: str) -> Optional[str]:
+        workspace_map = self._live_workspace_map()
+        if session_id in workspace_map:
+            return workspace_map[session_id]
+
         # 1. Try to infer from transcript cache.
         messages = self.get_session_messages(session_id)
         for msg in messages:
@@ -106,6 +228,34 @@ class AntigravitySessionStore:
                     return str(p if p.is_dir() else p.parent)
 
         return None
+
+    def _live_workspace_map(self) -> Dict[str, str]:
+        summary_result = self._live_ls_rpc("GetAllCascadeTrajectories", {})
+        summaries = summary_result.get("trajectorySummaries") if isinstance(summary_result, dict) else None
+        if not isinstance(summaries, dict):
+            return {}
+
+        workspace_map: Dict[str, str] = {}
+        for session_id, summary in summaries.items():
+            if not isinstance(summary, dict):
+                continue
+            workspaces = summary.get("workspaces")
+            if not isinstance(workspaces, list):
+                continue
+            for workspace in workspaces:
+                if not isinstance(workspace, dict):
+                    continue
+                uri = workspace.get("workspaceFolderAbsoluteUri") or workspace.get("gitRootAbsoluteUri")
+                if not isinstance(uri, str) or not uri:
+                    continue
+                parsed = urllib.parse.urlparse(uri)
+                if parsed.scheme != "file":
+                    continue
+                path = urllib.parse.unquote(parsed.path)
+                if path:
+                    workspace_map[str(session_id)] = path
+                    break
+        return workspace_map
 
     def list_session_files(self, session_id: str) -> List[Dict[str, Any]]:
         session_dir = self.brain_dir / session_id
@@ -151,6 +301,16 @@ class AntigravitySessionStore:
         return {
             "session_id": session_id,
             "name": file_name,
+            "mime_type": self._mime_type(path),
+            "bytes": path.read_bytes(),
+        }
+
+    def get_attachment_bytes(self, path_str: str) -> Dict[str, Any]:
+        path = Path(path_str).expanduser()
+        if not path.exists() or not path.is_file():
+            raise FileNotFoundError(f"attachment not found: {path}")
+        return {
+            "name": path.name,
             "mime_type": self._mime_type(path),
             "bytes": path.read_bytes(),
         }
@@ -219,6 +379,15 @@ class AntigravitySessionStore:
             heading = self._first_heading(path.read_text(encoding="utf-8", errors="replace"))
             if heading:
                 return heading
+        cache_path = self._messages_cache_path(session_id)
+        if cache_path.exists():
+            try:
+                messages = self._read_json(cache_path)
+                for item in messages:
+                    if item.get("role") == "user" and item.get("content"):
+                        return str(item["content"]).strip()[:80]
+            except Exception:
+                pass
         return session_id
 
     def _artifact_summary(self, path: Path) -> str:
@@ -283,7 +452,7 @@ class AntigravitySessionStore:
         proc = subprocess.run(["ps", "-eo", "pid,args"], stdout=subprocess.PIPE, text=True, check=False)
         rows = []
         for line in proc.stdout.splitlines():
-            if "language_server_macos_arm" not in line or "csrf_token" not in line:
+            if ("language_server_macos_arm" not in line and "language_server_macos_x64" not in line) or "csrf_token" not in line:
                 continue
             match = re.match(r"\s*(\d+)\s+(.*)", line)
             if not match:
@@ -292,7 +461,7 @@ class AntigravitySessionStore:
         if not rows:
             return {"error": "no live language server found"}
 
-        pid, args = rows[-1]
+        pid, args = self._select_process_row(rows)
         csrf_match = re.search(r"--csrf_token\s+([0-9a-fA-F-]+)", args)
         if not csrf_match:
             return {"error": f"csrf token missing for pid {pid}"}
@@ -317,6 +486,28 @@ class AntigravitySessionStore:
             "csrf_token": csrf_match.group(1),
             "ports": sorted(set(ports)),
         }
+
+    def _select_process_row(self, rows: List[tuple[int, str]]) -> tuple[int, str]:
+        hints = self._workspace_hints()
+        for hint in hints:
+            for pid, args in rows:
+                if hint in args.lower():
+                    return pid, args
+        return rows[-1]
+
+    def _workspace_hints(self) -> List[str]:
+        parts = [part for part in self.repo_root.resolve().parts if part and part != "/"]
+        hints: List[str] = []
+        if parts:
+            hints.append(parts[-1].replace("-", "_").replace(".", "_").lower())
+        if len(parts) >= 2:
+            hints.append("_".join(parts[-2:]).replace("-", "_").replace(".", "_").lower())
+        if len(parts) >= 3:
+            hints.append("_".join(parts[-3:]).replace("-", "_").replace(".", "_").lower())
+        full = "_".join(parts).replace("-", "_").replace(".", "_").lower()
+        if full:
+            hints.append(full)
+        return list(dict.fromkeys(hints))
 
     def _ensure_live_ls_connection(self, wait_seconds: float = 12.0) -> Dict[str, Any]:
         conn = self._discover_live_ls_connection()
@@ -402,15 +593,71 @@ class AntigravitySessionStore:
             if step_type == "CORTEX_STEP_TYPE_USER_INPUT":
                 user_input = step.get("userInput") or {}
                 content = user_input.get("userResponse") or ""
+                attachments = self._extract_item_attachments(user_input.get("items") or [])
                 if content:
-                    messages.append(ChatMessage("user", content, created_at, step_index))
+                    messages.append(ChatMessage("user", content, created_at, step_index, attachments=attachments or None))
+                elif attachments:
+                    messages.append(ChatMessage("user", "", created_at, step_index, attachments=attachments))
             elif step_type == "CORTEX_STEP_TYPE_NOTIFY_USER":
                 notify = step.get("notifyUser") or {}
                 content = notify.get("notificationContent") or ""
                 if content:
                     messages.append(ChatMessage("assistant", content, created_at, step_index))
+            elif step_type == "CORTEX_STEP_TYPE_PLANNER_RESPONSE":
+                planner = step.get("plannerResponse") or {}
+                content = planner.get("modifiedResponse") or planner.get("response") or ""
+                thought = planner.get("thinking") or ""
+                if content or thought:
+                    messages.append(ChatMessage("assistant", content, created_at, step_index, thought=thought))
+            elif step_type == "CORTEX_STEP_TYPE_ERROR_MESSAGE":
+                error_message = step.get("errorMessage") or {}
+                error = error_message.get("error") or {}
+                content = error.get("userErrorMessage") or error.get("shortError") or ""
+                if content:
+                    messages.append(ChatMessage("assistant", content, created_at, step_index))
+            elif step_type == "CORTEX_STEP_TYPE_CHECKPOINT":
+                checkpoint = step.get("checkpoint") or {}
+                intent = checkpoint.get("userIntent") or ""
+                if intent:
+                    # Checkpoints are usually assistant thoughts
+                    messages.append(ChatMessage("assistant", "", created_at, step_index, thought=intent))
+            elif step_type == "CORTEX_STEP_TYPE_MESSAGE":
+                msg = step.get("message") or {}
+                content = msg.get("content") or ""
+                role = msg.get("role") or "assistant"
+                if content:
+                    messages.append(ChatMessage(role, content, created_at, step_index))
 
         return [asdict(item) for item in messages]
+
+    def _extract_item_attachments(self, items: Sequence[Any]) -> List[Dict[str, str]]:
+        attachments: List[Dict[str, str]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            wrapped = item.get("item") if isinstance(item.get("item"), dict) else item
+            if not isinstance(wrapped, dict):
+                continue
+            file_info = wrapped.get("file")
+            if not isinstance(file_info, dict):
+                continue
+            absolute_uri = file_info.get("absoluteUri")
+            if not isinstance(absolute_uri, str) or not absolute_uri:
+                continue
+            parsed = urllib.parse.urlparse(absolute_uri)
+            if parsed.scheme != "file":
+                continue
+            path = urllib.parse.unquote(parsed.path)
+            mime_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
+            attachments.append(
+                {
+                    "name": Path(path).name or path,
+                    "path": path,
+                    "mime_type": mime_type,
+                    "kind": "image" if mime_type.startswith("image/") else "file",
+                }
+            )
+        return attachments
 
 
 if __name__ == "__main__":
