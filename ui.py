@@ -909,6 +909,17 @@ class SessionUIHandler(BaseHTTPRequestHandler):
       }).join('');
     }
 
+    function optimisticUserMessage(message) {
+      return {
+        role: 'user',
+        content: message,
+        created_at: new Date().toISOString(),
+        step_index: null,
+        thought: null,
+        attachments: null,
+      };
+    }
+
     function renderSessionList() {
       const root = document.getElementById('session-list');
       root.innerHTML = state.filtered.map((item) => `
@@ -1137,6 +1148,11 @@ class SessionUIHandler(BaseHTTPRequestHandler):
         document.getElementById('file-input').value = '';
         renderSelectedFiles();
 
+        if (!forceNew && state.activeSessionId) {
+          state.messages = [...state.messages, optimisticUserMessage(message)];
+          await renderConversation();
+        }
+
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
@@ -1158,8 +1174,17 @@ class SessionUIHandler(BaseHTTPRequestHandler):
                 state.sessions.unshift(event.session);
               }
               state.filtered = [...state.sessions];
-              await selectSession(event.session_id);
-              setStatus(event.created ? `已创建会话 · ${event.session_id}` : `已连接会话 · ${event.session_id}`);
+              if (event.created || !state.activeSessionId) {
+                await selectSession(event.session_id);
+                setStatus(`已创建会话 · ${event.session_id}`);
+              } else {
+                state.activeSessionId = event.session_id;
+                history.replaceState(null, '', `/#${event.session_id}`);
+                renderSessionList();
+                renderTopbar();
+                await renderConversation();
+                setStatus(`已连接会话 · ${event.session_id}`);
+              }
               continue;
             }
 
