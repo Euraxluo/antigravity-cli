@@ -125,6 +125,7 @@ class AntigravitySessionStore:
             session_id = client.start_cascade()
 
         assert session_id is not None
+        paths = [self._move_upload_into_session(session_id, path) for path in paths]
         baseline = collector.capture_baseline(session_id)
         client.send_user_message(session_id, prompt, model=model, attachment_paths=paths)
         answer = collector.collect(session_id, baseline_step_count=baseline).strip()
@@ -140,7 +141,7 @@ class AntigravitySessionStore:
 
     def save_uploaded_file(self, filename: str, fileobj: BinaryIO) -> Path:
         safe_name = Path(filename or "upload.bin").name or "upload.bin"
-        upload_dir = self.cache_root / "_uploads" / dt.datetime.now().strftime("%Y%m%d")
+        upload_dir = self.cache_root / "_pending_uploads" / dt.datetime.now().strftime("%Y%m%d")
         upload_dir.mkdir(parents=True, exist_ok=True)
         target = upload_dir / f"{int(time.time() * 1000)}_{safe_name}"
         with target.open("wb") as f:
@@ -258,33 +259,32 @@ class AntigravitySessionStore:
         return workspace_map
 
     def list_session_files(self, session_id: str) -> List[Dict[str, Any]]:
-        session_dir = self.brain_dir / session_id
-        if not session_dir.exists():
-            return []
         files: List[SessionFile] = []
-        for path in sorted(session_dir.iterdir(), key=lambda p: p.name.lower()):
-            if not path.is_file():
+        candidate_dirs = [self.brain_dir / session_id, self._session_upload_dir(session_id)]
+        for directory in candidate_dirs:
+            if not directory.exists():
                 continue
-            if self._is_hidden_or_internal(path.name):
-                continue
-            stat = path.stat()
-            files.append(
-                SessionFile(
-                    name=path.name,
-                    updated_at=dt.datetime.fromtimestamp(stat.st_mtime, tz=dt.timezone.utc).isoformat(),
-                    size=stat.st_size,
-                    summary=self._artifact_summary(path),
-                    kind=self._file_kind(path),
-                    mime_type=self._mime_type(path),
+            for path in sorted(directory.iterdir(), key=lambda p: p.name.lower()):
+                if not path.is_file():
+                    continue
+                if self._is_hidden_or_internal(path.name):
+                    continue
+                stat = path.stat()
+                files.append(
+                    SessionFile(
+                        name=path.name,
+                        updated_at=dt.datetime.fromtimestamp(stat.st_mtime, tz=dt.timezone.utc).isoformat(),
+                        size=stat.st_size,
+                        summary=self._artifact_summary(path),
+                        kind=self._file_kind(path),
+                        mime_type=self._mime_type(path),
+                    )
                 )
-            )
+        files.sort(key=lambda item: item.name.lower())
         return [asdict(item) for item in files]
 
     def get_session_file_content(self, session_id: str, file_name: str) -> Dict[str, Any]:
-        allowed = {item["name"] for item in self.list_session_files(session_id)}
-        if file_name not in allowed:
-            raise FileNotFoundError(f"file not found for session {session_id}: {file_name}")
-        path = self.brain_dir / session_id / file_name
+        path = self._resolve_session_file_path(session_id, file_name)
         return {
             "session_id": session_id,
             "name": file_name,
@@ -294,16 +294,43 @@ class AntigravitySessionStore:
         }
 
     def get_session_file_bytes(self, session_id: str, file_name: str) -> Dict[str, Any]:
-        allowed = {item["name"] for item in self.list_session_files(session_id)}
-        if file_name not in allowed:
-            raise FileNotFoundError(f"file not found for session {session_id}: {file_name}")
-        path = self.brain_dir / session_id / file_name
+        path = self._resolve_session_file_path(session_id, file_name)
         return {
             "session_id": session_id,
             "name": file_name,
             "mime_type": self._mime_type(path),
             "bytes": path.read_bytes(),
         }
+
+    def _resolve_session_file_path(self, session_id: str, file_name: str) -> Path:
+        allowed = {item["name"] for item in self.list_session_files(session_id)}
+        if file_name not in allowed:
+            raise FileNotFoundError(f"file not found for session {session_id}: {file_name}")
+        for directory in (self.brain_dir / session_id, self._session_upload_dir(session_id)):
+            path = directory / file_name
+            if path.exists() and path.is_file():
+                return path
+        raise FileNotFoundError(f"file not found for session {session_id}: {file_name}")
+
+    def _session_upload_dir(self, session_id: str) -> Path:
+        path = self.cache_root / session_id / "uploads"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _move_upload_into_session(self, session_id: str, path: Path) -> Path:
+        source = Path(path)
+        if not source.exists():
+            return source
+        target_dir = self._session_upload_dir(session_id)
+        target = target_dir / source.name
+        if source.resolve() == target.resolve():
+            return target
+        counter = 1
+        while target.exists():
+            target = target_dir / f"{source.stem}_{counter}{source.suffix}"
+            counter += 1
+        source.replace(target)
+        return target
 
     def get_attachment_bytes(self, path_str: str) -> Dict[str, Any]:
         path = Path(path_str).expanduser()
