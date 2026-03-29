@@ -43,6 +43,16 @@ class SessionUIHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_stream_headers(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.end_headers()
+
+    def _write_stream_event(self, payload: Dict[str, Any]) -> None:
+        raw = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+        self.wfile.write(raw)
+        self.wfile.flush()
+
     def _read_json_body(self) -> Dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length) if length > 0 else b"{}"
@@ -130,6 +140,23 @@ class SessionUIHandler(BaseHTTPRequestHandler):
                     attachment_paths=attachment_paths,
                 )
                 self._send_json(result)
+                return
+
+            if parsed.path == "/api/chat/stream":
+                content_type = self.headers.get_content_type()
+                payload = self._read_form_body() if content_type == "multipart/form-data" else self._read_json_body()
+                attachment_paths = [self.store.save_uploaded_file(entry.filename, entry.file) for entry in payload.get("files", [])]
+                self._send_stream_headers()
+                for event in self.store.stream_message(
+                    payload.get("message") or "",
+                    session_id=payload.get("session_id") or None,
+                    timeout=float(payload.get("timeout") or 60.0),
+                    idle_seconds=float(payload.get("idle_seconds") or 1.5),
+                    poll=float(payload.get("poll") or 0.5),
+                    model=int(payload.get("model") or 1018),
+                    attachment_paths=attachment_paths,
+                ):
+                    self._write_stream_event(event)
                 return
 
             if parsed.path == "/api/chat/send":
@@ -1009,37 +1036,78 @@ class SessionUIHandler(BaseHTTPRequestHandler):
           form.append('files', file);
         }
 
-        const endpoint = forceNew ? '/api/chat/start' : '/api/chat/send';
+        const endpoint = '/api/chat/stream';
         const res = await fetch(endpoint, {
           method: 'POST',
           body: form
         });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || JSON.stringify(data));
+        if (!res.ok || !res.body) {
+          throw new Error(await res.text());
+        }
 
         input.value = '';
         document.getElementById('file-input').value = '';
         renderSelectedFiles();
-        state.sessions = await fetchJSON('/api/sessions');
-        if (data.session && !state.sessions.find((item) => item.id === data.session_id)) {
-          state.sessions.unshift(data.session);
-        }
-        state.filtered = [...state.sessions];
-        if (forceNew) {
-          await selectSession(data.session_id);
-          setStatus(`已创建新会话 · ${data.session_id}`);
-          startAutoRefresh(data.session_id);
-        } else {
-          state.activeSessionId = data.session_id;
-          state.activeFile = null;
-          state.messages = data.messages || [];
-          state.files = await fetchJSON(`/api/sessions/${encodeURIComponent(data.session_id)}/files`);
-          renderSessionList();
-          renderFileList();
-          renderTopbar();
-          await renderConversation();
-          history.replaceState(null, '', `/#${data.session_id}`);
-          setStatus(`已收到回复 · ${data.session_id}`);
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            const event = JSON.parse(line);
+
+            if (event.type === 'session') {
+              state.sessions = await fetchJSON('/api/sessions');
+              if (event.session && !state.sessions.find((item) => item.id === event.session_id)) {
+                state.sessions.unshift(event.session);
+              }
+              state.filtered = [...state.sessions];
+              await selectSession(event.session_id);
+              setStatus(event.created ? `已创建会话 · ${event.session_id}` : `已连接会话 · ${event.session_id}`);
+              continue;
+            }
+
+            if (event.type === 'delta') {
+              const existing = state.messages.find((item) => item.role === 'assistant' && item._streaming);
+              if (existing) {
+                existing.content = event.full;
+              } else {
+                state.messages.push({
+                  role: 'assistant',
+                  content: event.full,
+                  created_at: '',
+                  step_index: null,
+                  thought: null,
+                  attachments: null,
+                  _streaming: true,
+                });
+              }
+              await renderConversation();
+              setStatus(`正在接收回复 · ${event.session_id}`);
+              continue;
+            }
+
+            if (event.type === 'done') {
+              state.messages = event.messages || [];
+              state.sessions = await fetchJSON('/api/sessions');
+              state.filtered = [...state.sessions];
+              state.files = await fetchJSON(`/api/sessions/${encodeURIComponent(event.session_id)}/files`);
+              renderSessionList();
+              renderFileList();
+              renderTopbar();
+              await renderConversation();
+              history.replaceState(null, '', `/#${event.session_id}`);
+              setStatus(`已收到回复 · ${event.session_id}`);
+            }
+          }
         }
       } catch (err) {
         setStatus(String(err), true);

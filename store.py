@@ -196,6 +196,85 @@ class AntigravitySessionStore:
             "session": self.get_session_summary(session_id, fallback_title=prompt),
         }
 
+    def stream_message(
+        self,
+        message: str,
+        *,
+        session_id: Optional[str] = None,
+        timeout: float = 60.0,
+        idle_seconds: float = 1.5,
+        poll: float = 0.5,
+        model: int = 1018,
+        attachment_paths: Optional[Sequence[Path]] = None,
+    ):
+        prompt = (message or "").strip()
+        paths = list(attachment_paths or [])
+        if not prompt and not paths:
+            raise ValueError("message or attachment is required")
+
+        locator = RuntimeLocator(self.repo_root)
+        connection = locator.discover()
+        client = RuntimeRpcClient(connection)
+        collector = AnswerCollector(
+            client,
+            poll_interval=poll,
+            idle_seconds=idle_seconds,
+            timeout=timeout,
+            stdout=io.StringIO(),
+        )
+
+        created = session_id is None
+        if created:
+            session_id = client.start_cascade()
+
+        assert session_id is not None
+        paths = [self._move_upload_into_session(session_id, path) for path in paths]
+
+        cached_messages = [
+            asdict(
+                ChatMessage(
+                    "user",
+                    self._user_response_from_prompt_and_paths(prompt, paths),
+                    dt.datetime.now(dt.timezone.utc).isoformat(),
+                    None,
+                    attachments=self._attachments_from_paths(paths) or None,
+                )
+            )
+        ]
+        self._write_json(self._messages_cache_path(session_id), cached_messages)
+
+        yield {
+            "type": "session",
+            "session_id": session_id,
+            "created": created,
+            "messages": cached_messages,
+            "session": self.get_session_summary(session_id, fallback_title=prompt),
+        }
+
+        baseline = collector.capture_baseline(session_id)
+        client.send_user_message(session_id, prompt, model=model, attachment_paths=paths)
+
+        assistant_text = ""
+        for event in collector.iter_events(session_id, baseline_step_count=baseline):
+            if event["type"] == "delta":
+                assistant_text = event["full"]
+                yield {
+                    "type": "delta",
+                    "session_id": session_id,
+                    "delta": event["delta"],
+                    "full": assistant_text,
+                }
+                continue
+
+            messages = self.get_session_messages(session_id, force_refresh=True)
+            yield {
+                "type": "done",
+                "session_id": session_id,
+                "answer": assistant_text,
+                "messages": messages,
+                "session": self.get_session_summary(session_id, fallback_title=prompt),
+            }
+
     def save_uploaded_file(self, filename: str, fileobj: BinaryIO) -> Path:
         safe_name = Path(filename or "upload.bin").name or "upload.bin"
         upload_dir = self.cache_root / "_pending_uploads" / dt.datetime.now().strftime("%Y%m%d")
