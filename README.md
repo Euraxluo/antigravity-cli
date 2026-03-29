@@ -1,124 +1,270 @@
-# Session Browser
+# Session Browser Repo
 
-一个独立的本地 Session 浏览工具，面向 Antigravity 本地数据目录。
+`session_browser_repo` is a standalone local Antigravity project that can be published and run on its own.
 
-仓库里只有两个 Python 文件：
+It is no longer just a viewer. The repo now includes:
+
+- local Antigravity session browsing
+- session file and message inspection
+- direct chatting from a local web UI
+- headless runtime `send` / `resume` / `stream`
+- file and image attachments
+- session workspace display
+- streaming assistant output
+- a shared Typer CLI used by both the UI and terminal workflows
+
+## Repository Layout
+
+Core files and directories:
 
 - `store.py`
-  负责读取本地 session 数据，并对外提供四类能力：
-  - session 列表
-  - session 的文件列表
-  - session 文件内容
-  - session 的历史对话记录，按角色拆分
+  The main entry point and Typer CLI. It handles:
+  - session listing
+  - session files and file content
+  - message recovery
+  - runtime chat `send` / `resume` / `stream`
+  - attachment reads
+  - cache warmup
 
 - `ui.py`
-  负责启动本地 Web UI，并调用 `store.py` 暴露的能力。
+  The local web UI. It handles:
+  - HTTP APIs
+  - invoking the `store.py` CLI
+  - rendering sessions, messages, attachments, and file content
+  - chat input, uploads, model switching, and the image lightbox
 
-## 数据来源
+- `runtime_cli/ag_runtime.py`
+  The headless Antigravity runtime transport. It handles:
+  - launching or discovering the Antigravity runtime
+  - ConnectRPC requests
+  - `StartCascade`
+  - `SendUserCascadeMessage`
+  - `GetCascadeTrajectorySteps`
+  - incremental assistant output extraction
 
-默认读取以下本地目录：
+- `tests/`
+  The repo-local test suite, including:
+  - `test_ag_runtime.py`
+  - `test_runtime_payloads.py`
+  - `test_session_browser_store.py`
+  - `test_store_cli.py`
+
+## Data Sources
+
+By default, the project reads from:
 
 - `~/.gemini/antigravity/conversations`
 - `~/.gemini/antigravity/brain`
+- this repository's own `.cache/`
 
-历史对话优先使用本地缓存；必要时会尝试从 Antigravity 的本地运行时接口补齐。
+Local project state is stored under:
 
-## 实现原理
+- `.cache/<session_id>/messages.json`
+  The recovered message cache for this project
+- `.cache/<session_id>/steps.json`
+  Cached runtime steps
+- `.cache/<session_id>/uploads/`
+  Session-scoped uploaded files
 
-整体只有两层：
-
-### 1. `store.py`
-
-`store.py` 是唯一的数据入口，内部的 `AntigravitySessionStore` class 负责对外提供四类能力：
-
-1. `session` 列表
-2. `session` 的文件列表
-3. 文件内容
-4. 按角色拆分的历史对话记录
-
-它的工作方式是：
-
-- 扫描 `~/.gemini/antigravity/conversations/*.pb` 生成 session 列表
-- 扫描 `~/.gemini/antigravity/brain/<session_id>/` 生成文件列表
-- 直接读取具体文件内容
-- 读取或恢复这个 session 的历史消息
-
-历史消息恢复链路如下：
-
-1. 先读本地缓存 `brain/<id>/.live-cache/messages.json`
-2. 如果没有缓存，就尝试读取旧的 step 缓存
-3. 如果当前 Antigravity 的本地 language server 正在运行，就调用本地 HTTP API：
-   - `GetCascadeTrajectorySteps`
-4. 将返回的 step 数据转换成按角色的消息：
-   - `CORTEX_STEP_TYPE_USER_INPUT` -> `user`
-   - `CORTEX_STEP_TYPE_NOTIFY_USER` -> `assistant`
-5. 成功后把结果写回 `.live-cache`，后续直接复用
-
-### 2. `ui.py`
-
-`ui.py` 只是一个很薄的 Web UI 壳：
-
-- 启动一个本地 HTTP 服务
-- 暴露固定的 JSON API
-- 用浏览器页面消费这些 API
-
-当前 API 只有：
-
-- `/api/sessions`
-- `/api/sessions/<id>/files`
-- `/api/sessions/<id>/files/<name>`
-- `/api/sessions/<id>/files/<name>/raw`
-- `/api/sessions/<id>/messages`
-
-UI 结构是三栏：
-
-- 左边：session 列表
-- 中间：文件列表
-- 右边：默认显示历史对话；点文件后显示文件内容
-
-图片文件不走文本接口，而是走 `/raw`，所以可以被浏览器正常渲染，并支持放大查看。
-
-## 为什么不直接解密 `.pb`
-
-这个工具没有走“直接硬解 `.pb`”的路线，原因是：
-
-- `conversations/*.pb` 本体是高熵二进制容器
-- `protoc --decode_raw` 对目标文件直接失败
-- 直接字符串抽取基本拿不到稳定正文
-
-相比之下，Antigravity 自己已经有一套本地 runtime API 能返回结构化的 step 数据。  
-因此这里选择的是更稳定的方案：
-
-- 优先使用 Antigravity 自己的 runtime 数据
-- 再将结果缓存成自己的消息结构
-- 让 UI 读取缓存，而不是每次都依赖 live 进程
-
-这也是为什么这个工具在多数情况下比直接逆向 `.pb` 更可靠。
-
-## 运行
-
-在仓库目录执行：
+## Running the Web UI
 
 ```bash
-python3 ui.py --host 127.0.0.1 --port 8770 --open
+cd /Users/echo/project/antigravity_cli/session_browser_repo
+python3 ui.py --host 127.0.0.1 --port 8770
 ```
 
-然后在浏览器访问：
+Open:
 
 ```text
 http://127.0.0.1:8770/
 ```
 
-## 对外功能
+## Running the CLI
 
-这个工具只提供以下功能：
+```bash
+cd /Users/echo/project/antigravity_cli/session_browser_repo
+python3 store.py --help
+```
 
-1. session 列表
-2. session 的文件列表
-3. session 文件内容
-4. session 的历史对话记录，按角色分组
+## CLI Surface
 
-## 开发说明
+Top-level commands:
 
-- 保持仓库精简，默认只保留 `store.py` 和 `ui.py` 两个核心文件
-- 如需扩展，请优先在这两个文件内部重构，而不是继续增加分散脚本
+```bash
+python3 store.py models
+python3 store.py list
+python3 store.py files <session_id>
+python3 store.py messages <session_id> --refresh
+python3 store.py show <session_id>
+
+python3 store.py send "hello"
+python3 store.py send "continue" --session <session_id>
+python3 store.py resume --session <session_id> "continue"
+python3 store.py start "first message in a new chat"
+python3 store.py stream "stream a reply"
+```
+
+Grouped commands:
+
+```bash
+python3 store.py sessions list
+python3 store.py sessions files <session_id>
+python3 store.py sessions file-content <session_id> <file_name>
+python3 store.py sessions file-bytes <session_id> <file_name>
+python3 store.py sessions messages <session_id> --refresh
+
+python3 store.py chat send "hello"
+python3 store.py chat start "new chat"
+python3 store.py chat stream "streaming test"
+
+python3 store.py attachment bytes /absolute/path/to/file
+python3 store.py cache warm --limit 20
+```
+
+## Web UI Features
+
+The web UI currently supports:
+
+- a session list on the left
+- workspace display per session
+- a file list in the middle pane
+- rendered messages in the right pane
+- new-chat sending
+- resume sending
+- file and image selection before sending
+- image thumbnail previews before sending
+- click-to-expand image messages
+- Markdown rendering
+- Markdown table rendering
+- model switching
+
+## Model Selection
+
+Both the UI and CLI support model selection.
+
+Default model:
+
+- `Gemini 3 Flash`
+
+Built-in options:
+
+- `Gemini 3 Flash`
+- `Gemini Pro Low`
+- `Gemini Pro High`
+- `Claude Sonnet`
+- `Claude Opus`
+- `GPT OSS`
+
+CLI examples:
+
+```bash
+python3 store.py send "hello" --model 1018
+python3 store.py resume --session <id> "continue" --model 1154
+```
+
+## Attachment Flow
+
+Uploaded files do not stay only in the browser.
+
+The flow is:
+
+1. The UI accepts uploaded files.
+2. Files are first written to `.cache/_pending_uploads/...`.
+3. After a session id is created or resolved, files are moved to:
+
+```text
+.cache/<session_id>/uploads/...
+```
+
+4. Files are sent to the Antigravity runtime as attachment items:
+
+```json
+{
+  "item": {
+    "file": {
+      "absoluteUri": "file:///absolute/path/to/file"
+    }
+  }
+}
+```
+
+As a result:
+
+- uploaded files appear in the current session file list
+- chat messages in the UI also store attachment metadata
+
+## Workspace Resolution
+
+Session workspaces are not inferred only from free text anymore.
+
+The project first prefers authoritative runtime data from:
+
+- `GetAllCascadeTrajectories`
+- `trajectorySummaries[session_id].workspaces[]`
+
+Only when runtime workspace data is unavailable does it fall back to message or artifact path hints.
+
+## Streaming
+
+Chat streaming uses NDJSON events:
+
+- `session`
+- `delta`
+- `done`
+
+The UI reads `/api/chat/stream` incrementally and updates the conversation view live.
+
+## Tests
+
+The test suite now lives entirely inside this repository under `tests/`.
+
+Run:
+
+```bash
+cd /Users/echo/project/antigravity_cli/session_browser_repo
+python3 -m unittest discover -s tests -p 'test_*.py'
+```
+
+Syntax check:
+
+```bash
+python3 -m py_compile store.py ui.py runtime_cli/ag_runtime.py tests/test_*.py
+```
+
+## Verified So Far
+
+The project has already been verified against these behaviors:
+
+- session uploads are archived under the owning `session_id`
+- the new-chat button switches to the new session immediately
+- `/api/chat/stream` returns `session -> delta -> done`
+- UI chatting works
+- file upload works
+- image upload works
+- image lightbox works
+- Markdown table rendering works
+- top-level Typer CLI commands work
+
+## What to Commit
+
+Because this is now a standalone repository, the expected commit set is:
+
+- `store.py`
+- `ui.py`
+- `runtime_cli/`
+- `tests/`
+- `README.md`
+- `.gitignore`
+
+Do not commit:
+
+- `.cache/`
+- `.omx/`
+- `__pycache__/`
+
+## Development Rules
+
+- Keep this repository self-contained and avoid depending on parent-directory implementations.
+- Route the UI through the CLI adapter layer instead of bypassing the CLI.
+- Reuse `runtime_cli/ag_runtime.py` for runtime transport concerns.
+- For local data that belongs to one session, prefer `.cache/<session_id>/...`.

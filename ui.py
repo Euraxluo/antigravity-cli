@@ -58,6 +58,9 @@ class SessionUICLIClient:
         payload = self._run_json(["attachment", "bytes", path])
         return {"bytes": base64.b64decode(payload["base64"]), "mime_type": payload["mime_type"]}
 
+    def list_models(self) -> Any:
+        return self._run_json(["models"])
+
     def send_message(self, payload: Dict[str, Any], attachment_paths: list[Path]) -> Any:
         args = [
             "chat",
@@ -194,6 +197,10 @@ class SessionUIHandler(BaseHTTPRequestHandler):
                 self._send_json(self.store.list_sessions())
                 return
 
+            if parsed.path == "/api/models":
+                self._send_json(self.store.list_models())
+                return
+
             if len(parts) == 4 and parts[0] == "api" and parts[1] == "sessions" and parts[3] == "files":
                 self._send_json(self.store.list_session_files(parts[2]))
                 return
@@ -269,7 +276,7 @@ class SessionUIHandler(BaseHTTPRequestHandler):
 
     def _html(self) -> str:
         return """<!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -645,6 +652,14 @@ class SessionUIHandler(BaseHTTPRequestHandler):
     }
     .status-line.error { color: #b91c1c; }
     .action-group { display: flex; gap: 8px; }
+    .model-select {
+      border: 1px solid #d1d5db;
+      border-radius: 10px;
+      padding: 8px 10px;
+      background: #fff;
+      font-size: 12px;
+      color: #111827;
+    }
     .file-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     .file-label {
       display: inline-flex;
@@ -699,15 +714,15 @@ class SessionUIHandler(BaseHTTPRequestHandler):
     <aside class="sidebar">
       <div class="sidebar-head">
         <h1>Antigravity Sessions</h1>
-        <p>左侧 session，中间文件列表，右侧默认展示按角色分组的聊天记录。</p>
+        <p>Sessions on the left, files in the middle, and the conversation on the right.</p>
       </div>
-      <div class="search-wrap"><input id="search" class="search" placeholder="搜索 session id、标题"></div>
+      <div class="search-wrap"><input id="search" class="search" placeholder="Search by session id or title"></div>
       <div id="session-list" class="session-list"></div>
     </aside>
     <section class="files">
       <div class="files-head">
         <h2>Files</h2>
-        <p>只展示 session 文件。右侧默认显示聊天记录，点击文件后显示文件内容。</p>
+        <p>Only session files are shown here. Select a file to inspect its content.</p>
       </div>
       <div id="file-list" class="file-list"></div>
     </section>
@@ -715,18 +730,21 @@ class SessionUIHandler(BaseHTTPRequestHandler):
       <div id="topbar" class="topbar"></div>
       <div id="conversation" class="conversation"></div>
       <div class="composer">
-        <textarea id="composer-input" class="composer-input" placeholder="输入消息。若当前未选中 session，将自动开启新对话；若已选中 session，则会继续聊天。"></textarea>
+        <textarea id="composer-input" class="composer-input" placeholder="Type a message. If no session is selected, a new chat will start automatically. If a session is selected, the message will continue that chat."></textarea>
         <div class="file-row">
-          <button id="file-trigger-btn" class="file-label" type="button" onclick="document.getElementById('file-input').click()">添加图片/文件</button>
+          <button id="file-trigger-btn" class="file-label" type="button" onclick="document.getElementById('file-input').click()">Add image or file</button>
           <input id="file-input" class="file-input" type="file" multiple onchange="renderSelectedFiles()" aria-hidden="true">
           <div id="selected-file-list" class="selected-file-list"></div>
         </div>
         <div id="composer-preview-grid" class="composer-preview-grid"></div>
         <div class="composer-actions">
-          <div id="composer-status" class="status-line">准备就绪。</div>
+          <div id="composer-status" class="status-line">Ready.</div>
           <div class="action-group">
-            <button id="new-chat-btn" class="btn" type="button" onclick="sendChat(true)">新对话发送</button>
-            <button id="send-btn" class="btn primary" type="button" onclick="sendChat(false)">发送</button>
+            <select id="model-select" class="model-select" title="Model">
+              <option value="1018">Gemini 3 Flash</option>
+            </select>
+            <button id="new-chat-btn" class="btn" type="button" onclick="sendChat(true)">Send as new chat</button>
+            <button id="send-btn" class="btn primary" type="button" onclick="sendChat(false)">Send</button>
           </div>
         </div>
       </div>
@@ -737,8 +755,8 @@ class SessionUIHandler(BaseHTTPRequestHandler):
       <div class="lightbox-toolbar">
         <div id="lightbox-title" class="lightbox-title"></div>
         <div class="lightbox-actions">
-          <button id="lightbox-toggle" class="lightbox-btn" type="button">原始尺寸</button>
-          <button id="lightbox-close" class="lightbox-btn" type="button">关闭</button>
+          <button id="lightbox-toggle" class="lightbox-btn" type="button">Actual size</button>
+          <button id="lightbox-close" class="lightbox-btn" type="button">Close</button>
         </div>
       </div>
       <div id="lightbox-stage" class="lightbox-stage fit-width">
@@ -858,6 +876,15 @@ class SessionUIHandler(BaseHTTPRequestHandler):
       document.getElementById('new-chat-btn').disabled = sending;
       document.getElementById('composer-input').disabled = sending;
       document.getElementById('file-input').disabled = sending;
+      document.getElementById('model-select').disabled = sending;
+    }
+
+    async function loadModels() {
+      const models = await fetchJSON('/api/models');
+      const select = document.getElementById('model-select');
+      select.innerHTML = models.map((item) => `
+        <option value="${escapeHtml(String(item.id))}" ${item.default ? 'selected' : ''}>${escapeHtml(item.label)}</option>
+      `).join('');
     }
 
     function stopAutoRefresh() {
@@ -883,7 +910,7 @@ class SessionUIHandler(BaseHTTPRequestHandler):
           await renderConversation();
           const last = state.messages[state.messages.length - 1];
           if (last && last.role === 'assistant' && last.content) {
-            setStatus(`已收到回复 · ${sessionId}`);
+            setStatus(`Reply received · ${sessionId}`);
             stopAutoRefresh();
           }
         } catch (_) {
@@ -926,7 +953,7 @@ class SessionUIHandler(BaseHTTPRequestHandler):
         <article class="session ${item.id === state.activeSessionId ? 'active' : ''}" data-id="${item.id}">
           <div style="display: flex; justify-content: space-between; align-items: flex-start;">
             <h2 class="session-title" style="flex: 1;">${escapeHtml(item.title)}</h2>
-            <button class="refresh-btn" data-id="${item.id}" title="强制刷新消息缓存" style="background: none; border: none; color: #666; cursor: pointer; padding: 2px 4px; font-size: 14px;">↻</button>
+            <button class="refresh-btn" data-id="${item.id}" title="Force refresh message cache" style="background: none; border: none; color: #666; cursor: pointer; padding: 2px 4px; font-size: 14px;">↻</button>
           </div>
           <p class="session-meta">${escapeHtml(item.updated_local)} · ${item.file_count} files</p>
           <p class="session-summary">${escapeHtml(item.id)}</p>
@@ -969,7 +996,7 @@ class SessionUIHandler(BaseHTTPRequestHandler):
       const top = document.getElementById('topbar');
       const session = state.sessions.find((s) => s.id === state.activeSessionId);
       if (!session) {
-        top.innerHTML = '<h2>Antigravity Sessions</h2><p>选择一个 session 查看内容。</p>';
+        top.innerHTML = '<h2>Antigravity Sessions</h2><p>Select a session to inspect its content.</p>';
         return;
       }
       top.innerHTML = `
@@ -981,7 +1008,7 @@ class SessionUIHandler(BaseHTTPRequestHandler):
     async function renderConversation() {
       const root = document.getElementById('conversation');
       if (!state.activeSessionId) {
-        root.innerHTML = '<div class="empty">选择一个 session。</div>';
+        root.innerHTML = '<div class="empty">Select a session.</div>';
         return;
       }
 
@@ -998,7 +1025,7 @@ class SessionUIHandler(BaseHTTPRequestHandler):
                   </div>
                   ${msg.thought ? `
                     <details class="thought-wrap">
-                      <summary>思维链 / Thought</summary>
+                      <summary>Thought</summary>
                       <div class="thought-content">${escapeHtml(msg.thought)}</div>
                     </details>
                   ` : ''}
@@ -1006,7 +1033,7 @@ class SessionUIHandler(BaseHTTPRequestHandler):
                   ${renderAttachments(msg)}
                 </div>
               </section>
-            `).join('') : '<div class="empty">这个 session 暂时没有可恢复的聊天记录。</div>'}
+            `).join('') : '<div class="empty">No recoverable chat history is available for this session yet.</div>'}
           </div>
         `;
         for (const image of root.querySelectorAll('.attachment-image[data-lightbox-src]')) {
@@ -1061,7 +1088,7 @@ class SessionUIHandler(BaseHTTPRequestHandler):
       image.src = src;
       image.alt = alt || '';
       title.textContent = alt || '';
-      toggle.textContent = '原始尺寸';
+      toggle.textContent = 'Actual size';
       box.classList.add('open');
     }
 
@@ -1082,11 +1109,11 @@ class SessionUIHandler(BaseHTTPRequestHandler):
       if (imageState.mode === 'fit-width') {
         imageState.mode = 'actual-size';
         stage.className = 'lightbox-stage actual-size';
-        toggle.textContent = '适应宽度';
+        toggle.textContent = 'Fit width';
       } else {
         imageState.mode = 'fit-width';
         stage.className = 'lightbox-stage fit-width';
-        toggle.textContent = '原始尺寸';
+        toggle.textContent = 'Actual size';
       }
     }
 
@@ -1110,7 +1137,7 @@ class SessionUIHandler(BaseHTTPRequestHandler):
         if (btn) btn.style.opacity = '0.5';
         try {
             await selectSession(id, true);
-            setStatus(`已刷新 ${id}`);
+            setStatus(`Refreshed ${id}`);
         } finally {
             if (btn) btn.style.opacity = '1';
         }
@@ -1122,7 +1149,7 @@ class SessionUIHandler(BaseHTTPRequestHandler):
       if ((!message && selectedFiles().length === 0) || state.sending) return;
 
       setSending(true);
-      setStatus(forceNew ? '正在创建新对话并发送…' : '正在发送…');
+      setStatus(forceNew ? 'Creating a new chat and sending…' : 'Sending…');
 
       try {
         const form = new FormData();
@@ -1131,6 +1158,7 @@ class SessionUIHandler(BaseHTTPRequestHandler):
         form.append('timeout', '60');
         form.append('idle_seconds', '1.5');
         form.append('poll', '0.5');
+        form.append('model', document.getElementById('model-select').value);
         for (const file of selectedFiles()) {
           form.append('files', file);
         }
@@ -1176,14 +1204,14 @@ class SessionUIHandler(BaseHTTPRequestHandler):
               state.filtered = [...state.sessions];
               if (event.created || !state.activeSessionId) {
                 await selectSession(event.session_id);
-                setStatus(`已创建会话 · ${event.session_id}`);
+                setStatus(`Created session · ${event.session_id}`);
               } else {
                 state.activeSessionId = event.session_id;
                 history.replaceState(null, '', `/#${event.session_id}`);
                 renderSessionList();
                 renderTopbar();
                 await renderConversation();
-                setStatus(`已连接会话 · ${event.session_id}`);
+                setStatus(`Connected session · ${event.session_id}`);
               }
               continue;
             }
@@ -1204,7 +1232,7 @@ class SessionUIHandler(BaseHTTPRequestHandler):
                 });
               }
               await renderConversation();
-              setStatus(`正在接收回复 · ${event.session_id}`);
+              setStatus(`Receiving reply · ${event.session_id}`);
               continue;
             }
 
@@ -1218,7 +1246,7 @@ class SessionUIHandler(BaseHTTPRequestHandler):
               renderTopbar();
               await renderConversation();
               history.replaceState(null, '', `/#${event.session_id}`);
-              setStatus(`已收到回复 · ${event.session_id}`);
+              setStatus(`Reply received · ${event.session_id}`);
             }
           }
         }
@@ -1247,6 +1275,7 @@ class SessionUIHandler(BaseHTTPRequestHandler):
       document.getElementById('lightbox').addEventListener('click', (e) => {
         if (e.target.id === 'lightbox') closeLightbox();
       });
+      await loadModels();
       state.sessions = await fetchJSON('/api/sessions');
       state.filtered = [...state.sessions];
       document.getElementById('search').addEventListener('input', (e) => applySearch(e.target.value));

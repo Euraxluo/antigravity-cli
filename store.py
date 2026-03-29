@@ -21,10 +21,6 @@ import threading
 import typer
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
-
 from runtime_cli.ag_runtime import AnswerCollector, RuntimeLocator, RuntimeRpcClient
 
 app = typer.Typer(help="Session browser / Antigravity runtime CLI")
@@ -36,6 +32,16 @@ app.add_typer(sessions_app, name="sessions")
 app.add_typer(chat_app, name="chat")
 app.add_typer(attachment_app, name="attachment")
 app.add_typer(cache_app, name="cache")
+
+MODEL_OPTIONS = [
+    {"id": 1018, "label": "Gemini 3 Flash", "default": True},
+    {"id": 1164, "label": "Gemini Pro Low"},
+    {"id": 1165, "label": "Gemini Pro High"},
+    {"id": 1163, "label": "Claude Sonnet"},
+    {"id": 1154, "label": "Claude Opus"},
+    {"id": 342, "label": "GPT OSS"},
+]
+DEFAULT_MODEL_ID = 1018
 
 
 @dataclass
@@ -113,7 +119,7 @@ class AntigravitySessionStore:
         timeout: float = 60.0,
         idle_seconds: float = 1.5,
         poll: float = 0.5,
-        model: int = 1018,
+        model: int = DEFAULT_MODEL_ID,
         attachment_paths: Optional[Sequence[Path]] = None,
     ) -> Dict[str, Any]:
         prompt = (message or "").strip()
@@ -159,7 +165,7 @@ class AntigravitySessionStore:
         timeout: float = 60.0,
         idle_seconds: float = 1.5,
         poll: float = 0.5,
-        model: int = 1018,
+        model: int = DEFAULT_MODEL_ID,
         attachment_paths: Optional[Sequence[Path]] = None,
     ) -> Dict[str, Any]:
         prompt = (message or "").strip()
@@ -216,7 +222,7 @@ class AntigravitySessionStore:
         timeout: float = 60.0,
         idle_seconds: float = 1.5,
         poll: float = 0.5,
-        model: int = 1018,
+        model: int = DEFAULT_MODEL_ID,
         attachment_paths: Optional[Sequence[Path]] = None,
     ):
         prompt = (message or "").strip()
@@ -732,7 +738,7 @@ class AntigravitySessionStore:
 
         try:
             subprocess.run(
-                ["antigravity", "chat", "-m", "ask", "你好"],
+                ["antigravity", "chat", "-m", "ask", "hello"],
                 cwd=str(self.repo_root),
                 check=False,
                 stdout=subprocess.DEVNULL,
@@ -752,7 +758,7 @@ class AntigravitySessionStore:
     def _launch_antigravity_for_session(self, session_id: str) -> None:
         try:
             subprocess.run(
-                ["antigravity", "chat", "-m", "ask", "你好"],
+                ["antigravity", "chat", "-m", "ask", "hello"],
                 cwd=str(self.repo_root),
                 check=False,
                 stdout=subprocess.DEVNULL,
@@ -898,24 +904,28 @@ def _json_print(payload: Any) -> None:
     typer.echo(json.dumps(payload, ensure_ascii=False))
 
 
+def _store() -> AntigravitySessionStore:
+    return AntigravitySessionStore()
+
+
 @sessions_app.command("list")
 def sessions_list() -> None:
-    _json_print(AntigravitySessionStore().list_sessions())
+    _json_print(_store().list_sessions())
 
 
 @sessions_app.command("files")
 def sessions_files(session_id: str) -> None:
-    _json_print(AntigravitySessionStore().list_session_files(session_id))
+    _json_print(_store().list_session_files(session_id))
 
 
 @sessions_app.command("file-content")
 def sessions_file_content(session_id: str, file_name: str) -> None:
-    _json_print(AntigravitySessionStore().get_session_file_content(session_id, file_name))
+    _json_print(_store().get_session_file_content(session_id, file_name))
 
 
 @sessions_app.command("file-bytes")
 def sessions_file_bytes(session_id: str, file_name: str) -> None:
-    info = AntigravitySessionStore().get_session_file_bytes(session_id, file_name)
+    info = _store().get_session_file_bytes(session_id, file_name)
     _json_print(
         {
             "session_id": info["session_id"],
@@ -928,12 +938,17 @@ def sessions_file_bytes(session_id: str, file_name: str) -> None:
 
 @sessions_app.command("messages")
 def sessions_messages(session_id: str, refresh: bool = False) -> None:
-    _json_print(AntigravitySessionStore().get_session_messages(session_id, force_refresh=refresh))
+    _json_print(_store().get_session_messages(session_id, force_refresh=refresh))
+
+
+@app.command("models")
+def list_models() -> None:
+    _json_print(MODEL_OPTIONS)
 
 
 @attachment_app.command("bytes")
 def attachment_bytes(path: str) -> None:
-    info = AntigravitySessionStore().get_attachment_bytes(path)
+    info = _store().get_attachment_bytes(path)
     _json_print(
         {
             "name": info["name"],
@@ -950,11 +965,11 @@ def chat_send(
     timeout: float = 60.0,
     idle_seconds: float = typer.Option(1.5, "--idle-seconds"),
     poll: float = 0.5,
-    model: int = 1018,
+    model: int = DEFAULT_MODEL_ID,
     attachment: List[Path] = typer.Option([], "--attachment"),
 ) -> None:
     _json_print(
-        AntigravitySessionStore().send_message(
+        _store().send_message(
             message,
             session_id=session_id,
             timeout=timeout,
@@ -972,11 +987,11 @@ def chat_start(
     timeout: float = 60.0,
     idle_seconds: float = typer.Option(1.5, "--idle-seconds"),
     poll: float = 0.5,
-    model: int = 1018,
+    model: int = DEFAULT_MODEL_ID,
     attachment: List[Path] = typer.Option([], "--attachment"),
 ) -> None:
     _json_print(
-        AntigravitySessionStore().start_session_send(
+        _store().start_session_send(
             message,
             timeout=timeout,
             idle_seconds=idle_seconds,
@@ -994,10 +1009,10 @@ def chat_stream(
     timeout: float = 60.0,
     idle_seconds: float = typer.Option(1.5, "--idle-seconds"),
     poll: float = 0.5,
-    model: int = 1018,
+    model: int = DEFAULT_MODEL_ID,
     attachment: List[Path] = typer.Option([], "--attachment"),
 ) -> None:
-    for event in AntigravitySessionStore().stream_message(
+    for event in _store().stream_message(
         message,
         session_id=session_id,
         timeout=timeout,
@@ -1011,7 +1026,130 @@ def chat_stream(
 
 @cache_app.command("warm")
 def cache_warm(limit: int = 0) -> None:
-    _json_print(AntigravitySessionStore().warm_all_messages(None if limit <= 0 else limit))
+    _json_print(_store().warm_all_messages(None if limit <= 0 else limit))
+
+
+@app.command("list")
+def list_sessions_alias() -> None:
+    """Top-level alias for `sessions list`."""
+    sessions_list()
+
+
+@app.command("files")
+def list_files_alias(session_id: str = typer.Argument(..., help="Session id")) -> None:
+    """Top-level alias for `sessions files`."""
+    sessions_files(session_id)
+
+
+@app.command("messages")
+def messages_alias(
+    session_id: str = typer.Argument(..., help="Session id"),
+    refresh: bool = typer.Option(False, "--refresh", help="Force refresh from runtime"),
+) -> None:
+    """Top-level alias for `sessions messages`."""
+    sessions_messages(session_id, refresh=refresh)
+
+
+@app.command("show")
+def show_session_alias(
+    session_id: str = typer.Argument(..., help="Session id"),
+    refresh: bool = typer.Option(False, "--refresh", help="Force refresh message cache"),
+) -> None:
+    """Show one session with summary, files, and messages."""
+    store = _store()
+    _json_print(
+        {
+            "session": store.get_session_summary(session_id),
+            "files": store.list_session_files(session_id),
+            "messages": store.get_session_messages(session_id, force_refresh=refresh),
+        }
+    )
+
+
+@app.command("send")
+def send_alias(
+    message: str = typer.Argument(..., help="Message content"),
+    session: Optional[str] = typer.Option(None, "--session", help="Existing session id"),
+    timeout: float = 60.0,
+    idle_seconds: float = typer.Option(1.5, "--idle-seconds"),
+    poll: float = 0.5,
+    model: int = DEFAULT_MODEL_ID,
+    attachment: List[Path] = typer.Option([], "--attachment"),
+) -> None:
+    """Top-level send: create new session when no --session is provided."""
+    chat_send(
+        message=message,
+        session_id=session,
+        timeout=timeout,
+        idle_seconds=idle_seconds,
+        poll=poll,
+        model=model,
+        attachment=attachment,
+    )
+
+
+@app.command("resume")
+def resume_alias(
+    session: str = typer.Option(..., "--session", help="Existing session id"),
+    message: str = typer.Argument(..., help="Message content"),
+    timeout: float = 60.0,
+    idle_seconds: float = typer.Option(1.5, "--idle-seconds"),
+    poll: float = 0.5,
+    model: int = DEFAULT_MODEL_ID,
+    attachment: List[Path] = typer.Option([], "--attachment"),
+) -> None:
+    """Top-level alias for sending to an existing session."""
+    chat_send(
+        message=message,
+        session_id=session,
+        timeout=timeout,
+        idle_seconds=idle_seconds,
+        poll=poll,
+        model=model,
+        attachment=attachment,
+    )
+
+
+@app.command("start")
+def start_alias(
+    message: str = typer.Argument(..., help="First message content"),
+    timeout: float = 60.0,
+    idle_seconds: float = typer.Option(1.5, "--idle-seconds"),
+    poll: float = 0.5,
+    model: int = DEFAULT_MODEL_ID,
+    attachment: List[Path] = typer.Option([], "--attachment"),
+) -> None:
+    """Top-level alias for creating a new session and starting async send."""
+    chat_start(
+        message=message,
+        timeout=timeout,
+        idle_seconds=idle_seconds,
+        poll=poll,
+        model=model,
+        attachment=attachment,
+    )
+
+
+@app.command("stream")
+def stream_alias(
+    message: str = typer.Argument(..., help="Message content"),
+    session: Optional[str] = typer.Option(None, "--session", help="Existing session id"),
+    timeout: float = 60.0,
+    idle_seconds: float = typer.Option(1.5, "--idle-seconds"),
+    poll: float = 0.5,
+    model: int = DEFAULT_MODEL_ID,
+    attachment: List[Path] = typer.Option([], "--attachment"),
+) -> None:
+    """Top-level alias for streaming chat events."""
+    chat_stream(
+        message=message,
+        session_id=session,
+        timeout=timeout,
+        idle_seconds=idle_seconds,
+        poll=poll,
+        model=model,
+        attachment=attachment,
+    )
 
 
 if __name__ == "__main__":
