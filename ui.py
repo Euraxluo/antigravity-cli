@@ -3,19 +3,126 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import cgi
 import json
+import subprocess
+import sys
 import threading
 import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from store import AntigravitySessionStore
 
 
+class SessionUICLIClient:
+    def __init__(self) -> None:
+        self.store_script = Path(__file__).resolve().with_name("store.py")
+        self.python = sys.executable
+
+    def _run_json(self, args: list[str]) -> Any:
+        proc = subprocess.run(
+            [self.python, str(self.store_script), *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or f"store CLI failed: {' '.join(args)}")
+        return json.loads(proc.stdout)
+
+    def list_sessions(self) -> Any:
+        return self._run_json(["sessions", "list"])
+
+    def list_session_files(self, session_id: str) -> Any:
+        return self._run_json(["sessions", "files", session_id])
+
+    def get_session_file_content(self, session_id: str, file_name: str) -> Any:
+        return self._run_json(["sessions", "file-content", session_id, file_name])
+
+    def get_session_file_bytes(self, session_id: str, file_name: str) -> Dict[str, Any]:
+        payload = self._run_json(["sessions", "file-bytes", session_id, file_name])
+        return {"bytes": base64.b64decode(payload["base64"]), "mime_type": payload["mime_type"]}
+
+    def get_session_messages(self, session_id: str, force_refresh: bool = False) -> Any:
+        args = ["sessions", "messages", session_id]
+        if force_refresh:
+            args.append("--refresh")
+        return self._run_json(args)
+
+    def get_attachment_bytes(self, path: str) -> Dict[str, Any]:
+        payload = self._run_json(["attachment", "bytes", path])
+        return {"bytes": base64.b64decode(payload["base64"]), "mime_type": payload["mime_type"]}
+
+    def send_message(self, payload: Dict[str, Any], attachment_paths: list[Path]) -> Any:
+        args = [
+            "chat",
+            "send",
+            payload.get("message") or "",
+            "--timeout",
+            str(float(payload.get("timeout") or 60.0)),
+            "--idle-seconds",
+            str(float(payload.get("idle_seconds") or 1.5)),
+            "--poll",
+            str(float(payload.get("poll") or 0.5)),
+            "--model",
+            str(int(payload.get("model") or 1018)),
+        ]
+        if payload.get("session_id"):
+            args += ["--session-id", str(payload["session_id"])]
+        for path in attachment_paths:
+            args += ["--attachment", str(path)]
+        return self._run_json(args)
+
+    def start_session_send(self, payload: Dict[str, Any], attachment_paths: list[Path]) -> Any:
+        args = [
+            "chat",
+            "start",
+            payload.get("message") or "",
+            "--timeout",
+            str(float(payload.get("timeout") or 60.0)),
+            "--idle-seconds",
+            str(float(payload.get("idle_seconds") or 1.5)),
+            "--poll",
+            str(float(payload.get("poll") or 0.5)),
+            "--model",
+            str(int(payload.get("model") or 1018)),
+        ]
+        for path in attachment_paths:
+            args += ["--attachment", str(path)]
+        return self._run_json(args)
+
+    def stream_message(self, payload: Dict[str, Any], attachment_paths: list[Path]):
+        args = [
+            self.python,
+            str(self.store_script),
+            "chat",
+            "stream",
+            payload.get("message") or "",
+            "--timeout",
+            str(float(payload.get("timeout") or 60.0)),
+            "--idle-seconds",
+            str(float(payload.get("idle_seconds") or 1.5)),
+            "--poll",
+            str(float(payload.get("poll") or 0.5)),
+            "--model",
+            str(int(payload.get("model") or 1018)),
+        ]
+        if payload.get("session_id"):
+            args += ["--session-id", str(payload["session_id"])]
+        for path in attachment_paths:
+            args += ["--attachment", str(path)]
+        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        return proc
+
+
 class SessionUIHandler(BaseHTTPRequestHandler):
-    store = AntigravitySessionStore()
+    store = SessionUICLIClient()
+    uploader = AntigravitySessionStore()
 
     def log_message(self, fmt: str, *args: Any) -> None:
         return
@@ -130,48 +237,29 @@ class SessionUIHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/chat/start":
                 content_type = self.headers.get_content_type()
                 payload = self._read_form_body() if content_type == "multipart/form-data" else self._read_json_body()
-                attachment_paths = [self.store.save_uploaded_file(entry.filename, entry.file) for entry in payload.get("files", [])]
-                result = self.store.start_session_send(
-                    payload.get("message") or "",
-                    timeout=float(payload.get("timeout") or 60.0),
-                    idle_seconds=float(payload.get("idle_seconds") or 1.5),
-                    poll=float(payload.get("poll") or 0.5),
-                    model=int(payload.get("model") or 1018),
-                    attachment_paths=attachment_paths,
-                )
+                attachment_paths = [self.uploader.save_uploaded_file(entry.filename, entry.file) for entry in payload.get("files", [])]
+                result = self.store.start_session_send(payload, attachment_paths)
                 self._send_json(result)
                 return
 
             if parsed.path == "/api/chat/stream":
                 content_type = self.headers.get_content_type()
                 payload = self._read_form_body() if content_type == "multipart/form-data" else self._read_json_body()
-                attachment_paths = [self.store.save_uploaded_file(entry.filename, entry.file) for entry in payload.get("files", [])]
+                attachment_paths = [self.uploader.save_uploaded_file(entry.filename, entry.file) for entry in payload.get("files", [])]
                 self._send_stream_headers()
-                for event in self.store.stream_message(
-                    payload.get("message") or "",
-                    session_id=payload.get("session_id") or None,
-                    timeout=float(payload.get("timeout") or 60.0),
-                    idle_seconds=float(payload.get("idle_seconds") or 1.5),
-                    poll=float(payload.get("poll") or 0.5),
-                    model=int(payload.get("model") or 1018),
-                    attachment_paths=attachment_paths,
-                ):
-                    self._write_stream_event(event)
+                proc = self.store.stream_message(payload, attachment_paths)
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    if line.strip():
+                        self.wfile.write(line.encode("utf-8"))
+                        self.wfile.flush()
                 return
 
             if parsed.path == "/api/chat/send":
                 content_type = self.headers.get_content_type()
                 payload = self._read_form_body() if content_type == "multipart/form-data" else self._read_json_body()
-                attachment_paths = [self.store.save_uploaded_file(entry.filename, entry.file) for entry in payload.get("files", [])]
-                result = self.store.send_message(
-                    payload.get("message") or "",
-                    session_id=payload.get("session_id") or None,
-                    timeout=float(payload.get("timeout") or 60.0),
-                    idle_seconds=float(payload.get("idle_seconds") or 1.5),
-                    poll=float(payload.get("poll") or 0.5),
-                    model=int(payload.get("model") or 1018),
-                    attachment_paths=attachment_paths,
-                )
+                attachment_paths = [self.uploader.save_uploaded_file(entry.filename, entry.file) for entry in payload.get("files", [])]
+                result = self.store.send_message(payload, attachment_paths)
                 self._send_json(result)
                 return
 
@@ -1168,18 +1256,19 @@ class SessionUIHandler(BaseHTTPRequestHandler):
 
 
 class SessionUIApp:
-    def __init__(self, store: Optional[AntigravitySessionStore] = None) -> None:
-        self.store = store or AntigravitySessionStore()
+    def __init__(self, store: Optional[SessionUICLIClient] = None) -> None:
+        self.store = store or SessionUICLIClient()
 
     def warm_messages_in_background(self) -> None:
         def _runner() -> None:
-            result = self.store.warm_all_messages()
+            result = self.store._run_json(["cache", "warm"])
             print("[warm-all]", json.dumps(result, ensure_ascii=False))
 
         threading.Thread(target=_runner, daemon=True).start()
 
     def serve(self, host: str = "127.0.0.1", port: int = 8766, open_browser: bool = True) -> None:
         SessionUIHandler.store = self.store
+        SessionUIHandler.uploader = AntigravitySessionStore()
         server = ThreadingHTTPServer((host, port), SessionUIHandler)
         url = f"http://{host}:{port}/"
         self.warm_messages_in_background()

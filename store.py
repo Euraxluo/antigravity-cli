@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import base64
 import io
 import mimetypes
 import json
@@ -17,6 +18,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Sequence
 import threading
+import typer
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +26,16 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from runtime_cli.ag_runtime import AnswerCollector, RuntimeLocator, RuntimeRpcClient
+
+app = typer.Typer(help="Session browser / Antigravity runtime CLI")
+sessions_app = typer.Typer(help="Session read operations")
+chat_app = typer.Typer(help="Chat operations")
+attachment_app = typer.Typer(help="Attachment read operations")
+cache_app = typer.Typer(help="Cache operations")
+app.add_typer(sessions_app, name="sessions")
+app.add_typer(chat_app, name="chat")
+app.add_typer(attachment_app, name="attachment")
+app.add_typer(cache_app, name="cache")
 
 
 @dataclass
@@ -882,6 +894,125 @@ class AntigravitySessionStore:
         return (prefix + prompt).strip()
 
 
+def _json_print(payload: Any) -> None:
+    typer.echo(json.dumps(payload, ensure_ascii=False))
+
+
+@sessions_app.command("list")
+def sessions_list() -> None:
+    _json_print(AntigravitySessionStore().list_sessions())
+
+
+@sessions_app.command("files")
+def sessions_files(session_id: str) -> None:
+    _json_print(AntigravitySessionStore().list_session_files(session_id))
+
+
+@sessions_app.command("file-content")
+def sessions_file_content(session_id: str, file_name: str) -> None:
+    _json_print(AntigravitySessionStore().get_session_file_content(session_id, file_name))
+
+
+@sessions_app.command("file-bytes")
+def sessions_file_bytes(session_id: str, file_name: str) -> None:
+    info = AntigravitySessionStore().get_session_file_bytes(session_id, file_name)
+    _json_print(
+        {
+            "session_id": info["session_id"],
+            "name": info["name"],
+            "mime_type": info["mime_type"],
+            "base64": base64.b64encode(info["bytes"]).decode("ascii"),
+        }
+    )
+
+
+@sessions_app.command("messages")
+def sessions_messages(session_id: str, refresh: bool = False) -> None:
+    _json_print(AntigravitySessionStore().get_session_messages(session_id, force_refresh=refresh))
+
+
+@attachment_app.command("bytes")
+def attachment_bytes(path: str) -> None:
+    info = AntigravitySessionStore().get_attachment_bytes(path)
+    _json_print(
+        {
+            "name": info["name"],
+            "mime_type": info["mime_type"],
+            "base64": base64.b64encode(info["bytes"]).decode("ascii"),
+        }
+    )
+
+
+@chat_app.command("send")
+def chat_send(
+    message: str = typer.Argument(""),
+    session_id: Optional[str] = typer.Option(None, "--session-id"),
+    timeout: float = 60.0,
+    idle_seconds: float = typer.Option(1.5, "--idle-seconds"),
+    poll: float = 0.5,
+    model: int = 1018,
+    attachment: List[Path] = typer.Option([], "--attachment"),
+) -> None:
+    _json_print(
+        AntigravitySessionStore().send_message(
+            message,
+            session_id=session_id,
+            timeout=timeout,
+            idle_seconds=idle_seconds,
+            poll=poll,
+            model=model,
+            attachment_paths=attachment,
+        )
+    )
+
+
+@chat_app.command("start")
+def chat_start(
+    message: str = typer.Argument(""),
+    timeout: float = 60.0,
+    idle_seconds: float = typer.Option(1.5, "--idle-seconds"),
+    poll: float = 0.5,
+    model: int = 1018,
+    attachment: List[Path] = typer.Option([], "--attachment"),
+) -> None:
+    _json_print(
+        AntigravitySessionStore().start_session_send(
+            message,
+            timeout=timeout,
+            idle_seconds=idle_seconds,
+            poll=poll,
+            model=model,
+            attachment_paths=attachment,
+        )
+    )
+
+
+@chat_app.command("stream")
+def chat_stream(
+    message: str = typer.Argument(""),
+    session_id: Optional[str] = typer.Option(None, "--session-id"),
+    timeout: float = 60.0,
+    idle_seconds: float = typer.Option(1.5, "--idle-seconds"),
+    poll: float = 0.5,
+    model: int = 1018,
+    attachment: List[Path] = typer.Option([], "--attachment"),
+) -> None:
+    for event in AntigravitySessionStore().stream_message(
+        message,
+        session_id=session_id,
+        timeout=timeout,
+        idle_seconds=idle_seconds,
+        poll=poll,
+        model=model,
+        attachment_paths=attachment,
+    ):
+        _json_print(event)
+
+
+@cache_app.command("warm")
+def cache_warm(limit: int = 0) -> None:
+    _json_print(AntigravitySessionStore().warm_all_messages(None if limit <= 0 else limit))
+
+
 if __name__ == "__main__":
-    store = AntigravitySessionStore()
-    print(json.dumps(store.warm_all_messages(), ensure_ascii=False, indent=2))
+    app()
