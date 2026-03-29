@@ -117,6 +117,21 @@ class SessionUIHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
 
         try:
+            if parsed.path == "/api/chat/start":
+                content_type = self.headers.get_content_type()
+                payload = self._read_form_body() if content_type == "multipart/form-data" else self._read_json_body()
+                attachment_paths = [self.store.save_uploaded_file(entry.filename, entry.file) for entry in payload.get("files", [])]
+                result = self.store.start_session_send(
+                    payload.get("message") or "",
+                    timeout=float(payload.get("timeout") or 60.0),
+                    idle_seconds=float(payload.get("idle_seconds") or 1.5),
+                    poll=float(payload.get("poll") or 0.5),
+                    model=int(payload.get("model") or 1018),
+                    attachment_paths=attachment_paths,
+                )
+                self._send_json(result)
+                return
+
             if parsed.path == "/api/chat/send":
                 content_type = self.headers.get_content_type()
                 payload = self._read_form_body() if content_type == "multipart/form-data" else self._read_json_body()
@@ -587,7 +602,7 @@ class SessionUIHandler(BaseHTTPRequestHandler):
       <div class="composer">
         <textarea id="composer-input" class="composer-input" placeholder="输入消息。若当前未选中 session，将自动开启新对话；若已选中 session，则会继续聊天。"></textarea>
         <div class="file-row">
-          <button id="file-trigger-btn" class="file-label" type="button">添加图片/文件</button>
+          <button id="file-trigger-btn" class="file-label" type="button" onclick="document.getElementById('file-input').click()">添加图片/文件</button>
           <input id="file-input" class="file-input" type="file" multiple onchange="renderSelectedFiles()" aria-hidden="true">
           <div id="selected-file-list" class="selected-file-list"></div>
         </div>
@@ -595,8 +610,8 @@ class SessionUIHandler(BaseHTTPRequestHandler):
         <div class="composer-actions">
           <div id="composer-status" class="status-line">准备就绪。</div>
           <div class="action-group">
-            <button id="new-chat-btn" class="btn" type="button">新对话发送</button>
-            <button id="send-btn" class="btn primary" type="button">发送</button>
+            <button id="new-chat-btn" class="btn" type="button" onclick="sendChat(true)">新对话发送</button>
+            <button id="send-btn" class="btn primary" type="button" onclick="sendChat(false)">发送</button>
           </div>
         </div>
       </div>
@@ -619,6 +634,7 @@ class SessionUIHandler(BaseHTTPRequestHandler):
   <script>
     const state = { sessions: [], filtered: [], activeSessionId: null, activeFile: null, files: [], messages: [], sending: false };
     const imageState = { mode: 'fit-width' };
+    let autoRefreshTimer = null;
 
     async function fetchJSON(url) {
       const res = await fetch(url);
@@ -727,6 +743,38 @@ class SessionUIHandler(BaseHTTPRequestHandler):
       document.getElementById('new-chat-btn').disabled = sending;
       document.getElementById('composer-input').disabled = sending;
       document.getElementById('file-input').disabled = sending;
+    }
+
+    function stopAutoRefresh() {
+      if (autoRefreshTimer) {
+        clearInterval(autoRefreshTimer);
+        autoRefreshTimer = null;
+      }
+    }
+
+    function startAutoRefresh(sessionId, durationMs = 45000, intervalMs = 1500) {
+      stopAutoRefresh();
+      const startedAt = Date.now();
+      autoRefreshTimer = setInterval(async () => {
+        if (Date.now() - startedAt > durationMs) {
+          stopAutoRefresh();
+          return;
+        }
+        if (state.activeSessionId !== sessionId) return;
+        try {
+          state.files = await fetchJSON(`/api/sessions/${encodeURIComponent(sessionId)}/files`);
+          state.messages = await fetchJSON(`/api/sessions/${encodeURIComponent(sessionId)}/messages?refresh=1`);
+          renderFileList();
+          await renderConversation();
+          const last = state.messages[state.messages.length - 1];
+          if (last && last.role === 'assistant' && last.content) {
+            setStatus(`已收到回复 · ${sessionId}`);
+            stopAutoRefresh();
+          }
+        } catch (_) {
+          // ignore transient refresh errors during background send
+        }
+      }, intervalMs);
     }
 
     function selectedFiles() {
@@ -917,6 +965,9 @@ class SessionUIHandler(BaseHTTPRequestHandler):
     }
 
     async function selectSession(id, forceRefresh = false) {
+      if (state.activeSessionId !== id) {
+        stopAutoRefresh();
+      }
       state.activeSessionId = id;
       state.files = await fetchJSON(`/api/sessions/${encodeURIComponent(id)}/files`);
       state.messages = await fetchJSON(`/api/sessions/${encodeURIComponent(id)}/messages${forceRefresh ? '?refresh=1' : ''}`);
@@ -958,7 +1009,8 @@ class SessionUIHandler(BaseHTTPRequestHandler):
           form.append('files', file);
         }
 
-        const res = await fetch('/api/chat/send', {
+        const endpoint = forceNew ? '/api/chat/start' : '/api/chat/send';
+        const res = await fetch(endpoint, {
           method: 'POST',
           body: form
         });
@@ -968,21 +1020,27 @@ class SessionUIHandler(BaseHTTPRequestHandler):
         input.value = '';
         document.getElementById('file-input').value = '';
         renderSelectedFiles();
-        state.activeSessionId = data.session_id;
-        state.activeFile = null;
-        state.messages = data.messages || [];
-        state.files = await fetchJSON(`/api/sessions/${encodeURIComponent(data.session_id)}/files`);
         state.sessions = await fetchJSON('/api/sessions');
         if (data.session && !state.sessions.find((item) => item.id === data.session_id)) {
           state.sessions.unshift(data.session);
         }
         state.filtered = [...state.sessions];
-        renderSessionList();
-        renderFileList();
-        renderTopbar();
-        await renderConversation();
-        history.replaceState(null, '', `/#${data.session_id}`);
-        setStatus(`已收到回复 · ${data.session_id}`);
+        if (forceNew) {
+          await selectSession(data.session_id);
+          setStatus(`已创建新会话 · ${data.session_id}`);
+          startAutoRefresh(data.session_id);
+        } else {
+          state.activeSessionId = data.session_id;
+          state.activeFile = null;
+          state.messages = data.messages || [];
+          state.files = await fetchJSON(`/api/sessions/${encodeURIComponent(data.session_id)}/files`);
+          renderSessionList();
+          renderFileList();
+          renderTopbar();
+          await renderConversation();
+          history.replaceState(null, '', `/#${data.session_id}`);
+          setStatus(`已收到回复 · ${data.session_id}`);
+        }
       } catch (err) {
         setStatus(String(err), true);
       } finally {

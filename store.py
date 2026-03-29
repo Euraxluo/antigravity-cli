@@ -16,6 +16,7 @@ import urllib.request
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Sequence
+import threading
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -139,6 +140,62 @@ class AntigravitySessionStore:
             "session": self.get_session_summary(session_id, fallback_title=prompt),
         }
 
+    def start_session_send(
+        self,
+        message: str,
+        *,
+        timeout: float = 60.0,
+        idle_seconds: float = 1.5,
+        poll: float = 0.5,
+        model: int = 1018,
+        attachment_paths: Optional[Sequence[Path]] = None,
+    ) -> Dict[str, Any]:
+        prompt = (message or "").strip()
+        paths = list(attachment_paths or [])
+        if not prompt and not paths:
+            raise ValueError("message or attachment is required")
+
+        locator = RuntimeLocator(self.repo_root)
+        connection = locator.discover()
+        client = RuntimeRpcClient(connection)
+        session_id = client.start_cascade()
+        paths = [self._move_upload_into_session(session_id, path) for path in paths]
+
+        cached_messages = [
+            asdict(
+                ChatMessage(
+                    "user",
+                    self._user_response_from_prompt_and_paths(prompt, paths),
+                    dt.datetime.now(dt.timezone.utc).isoformat(),
+                    None,
+                    attachments=self._attachments_from_paths(paths) or None,
+                )
+            )
+        ]
+        self._write_json(self._messages_cache_path(session_id), cached_messages)
+
+        threading.Thread(
+            target=self._send_message_background,
+            kwargs={
+                "session_id": session_id,
+                "message": prompt,
+                "timeout": timeout,
+                "idle_seconds": idle_seconds,
+                "poll": poll,
+                "model": model,
+                "attachment_paths": paths,
+            },
+            daemon=True,
+        ).start()
+
+        return {
+            "session_id": session_id,
+            "created": True,
+            "answer": "",
+            "messages": cached_messages,
+            "session": self.get_session_summary(session_id, fallback_title=prompt),
+        }
+
     def save_uploaded_file(self, filename: str, fileobj: BinaryIO) -> Path:
         safe_name = Path(filename or "upload.bin").name or "upload.bin"
         upload_dir = self.cache_root / "_pending_uploads" / dt.datetime.now().strftime("%Y%m%d")
@@ -151,6 +208,47 @@ class AntigravitySessionStore:
                     break
                 f.write(chunk)
         return target
+
+    def _send_message_background(
+        self,
+        *,
+        session_id: str,
+        message: str,
+        timeout: float,
+        idle_seconds: float,
+        poll: float,
+        model: int,
+        attachment_paths: Sequence[Path],
+    ) -> None:
+        try:
+            self.send_message(
+                message,
+                session_id=session_id,
+                timeout=timeout,
+                idle_seconds=idle_seconds,
+                poll=poll,
+                model=model,
+                attachment_paths=attachment_paths,
+            )
+        except Exception as exc:
+            cached = []
+            cache_path = self._messages_cache_path(session_id)
+            if cache_path.exists():
+                try:
+                    cached = self._read_json(cache_path)
+                except Exception:
+                    cached = []
+            cached.append(
+                asdict(
+                    ChatMessage(
+                        "assistant",
+                        f"error: {exc}",
+                        dt.datetime.now(dt.timezone.utc).isoformat(),
+                        None,
+                    )
+                )
+            )
+            self._write_json(cache_path, cached)
 
     def list_sessions(self) -> List[Dict[str, Any]]:
         session_ids: set[str] = set()
@@ -685,6 +783,24 @@ class AntigravitySessionStore:
                 }
             )
         return attachments
+
+    def _attachments_from_paths(self, paths: Sequence[Path]) -> List[Dict[str, str]]:
+        attachments: List[Dict[str, str]] = []
+        for path in paths:
+            mime_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            attachments.append(
+                {
+                    "name": path.name,
+                    "path": str(path),
+                    "mime_type": mime_type,
+                    "kind": "image" if mime_type.startswith("image/") else "file",
+                }
+            )
+        return attachments
+
+    def _user_response_from_prompt_and_paths(self, prompt: str, paths: Sequence[Path]) -> str:
+        prefix = "".join(f"@[{path}] " for path in paths)
+        return (prefix + prompt).strip()
 
 
 if __name__ == "__main__":
