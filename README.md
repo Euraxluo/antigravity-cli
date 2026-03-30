@@ -1,6 +1,6 @@
-# Session Browser Repo
+# Antigravity Session Browser
 
-`session_browser_repo` is a standalone local Antigravity project that can be published and run on its own.
+`antigravity-session-browser` is a standalone local Antigravity project that can be published and run on its own.
 
 It is no longer just a viewer. The repo now includes:
 
@@ -69,7 +69,7 @@ Local project state is stored under:
 ## Running the Web UI
 
 ```bash
-cd /Users/echo/project/antigravity_cli/session_browser_repo
+cd /Users/echo/project/antigravity_cli/antigravity-session-browser
 python3 ui.py --host 127.0.0.1 --port 8770
 ```
 
@@ -82,7 +82,7 @@ http://127.0.0.1:8770/
 ## Running the CLI
 
 ```bash
-cd /Users/echo/project/antigravity_cli/session_browser_repo
+cd /Users/echo/project/antigravity_cli/antigravity-session-browser
 python3 store.py --help
 ```
 
@@ -221,7 +221,7 @@ The test suite now lives entirely inside this repository under `tests/`.
 Run:
 
 ```bash
-cd /Users/echo/project/antigravity_cli/session_browser_repo
+cd /Users/echo/project/antigravity_cli/antigravity-session-browser
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
@@ -268,3 +268,22 @@ Do not commit:
 - Route the UI through the CLI adapter layer instead of bypassing the CLI.
 - Reuse `runtime_cli/ag_runtime.py` for runtime transport concerns.
 - For local data that belongs to one session, prefer `.cache/<session_id>/...`.
+
+
+
+## UI
+
+![alt text](image.png)
+
+![alt text](image-1.png)
+
+![alt text](image-2.png)
+
+![alt text](image-3.png)
+
+
+## Potential Bugs:
+
+There might still be some minor bugs, but overall, this project seems like a great starting point for handling a variety of session-based tasks in Antigravity.
+
+If you need any help or further guidance on this project, feel free to ask!
