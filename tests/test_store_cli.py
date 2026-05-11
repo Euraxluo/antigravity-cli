@@ -1,4 +1,6 @@
 import base64
+import json
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -11,6 +13,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import store as store_module
+import runtime_cli.model_registry as model_registry
+from runtime_cli.model_registry import extract_model_options_from_user_status, load_model_options, model_enum_id
 
 
 class FakeStore:
@@ -62,7 +66,54 @@ class StoreCliTests(unittest.TestCase):
     def test_models(self):
         result = self.runner.invoke(store_module.app, ["models"])
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("Gemini 3 Flash", result.stdout)
+        self.assertIn("Gemini 3.1 Pro (High)", result.stdout)
+        self.assertIn('"id": 1037', result.stdout)
+
+    def test_models_env_override(self):
+        payload = json.dumps([{"id": 2048, "label": "Custom Antigravity Model", "default": True}])
+        with mock.patch.dict(os.environ, {"ANTIGRAVITY_MODELS_JSON": payload}):
+            result = self.runner.invoke(store_module.app, ["models"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Custom Antigravity Model", result.stdout)
+        self.assertIn('"id": 2048', result.stdout)
+
+    def test_model_registry_extracts_antigravity_ui_models(self):
+        self.assertEqual(model_enum_id("MODEL_PLACEHOLDER_M37"), 1037)
+        self.assertEqual(model_enum_id("MODEL_PLACEHOLDER_M84"), 1084)
+        payload = {
+            "userStatus": {
+                "cascadeModelConfigData": {
+                    "clientModelConfigs": [
+                        {"label": "Gemini 3 Flash", "modelOrAlias": {"model": "MODEL_PLACEHOLDER_M84"}},
+                        {"label": "Gemini 3.1 Pro (High)", "modelOrAlias": {"model": "MODEL_PLACEHOLDER_M37"}},
+                        {"label": "GPT-OSS 120B (Medium)", "modelOrAlias": {"model": "MODEL_OPENAI_GPT_OSS_120B_MEDIUM"}},
+                    ],
+                    "clientModelSorts": [{
+                        "name": "Recommended",
+                        "groups": [{"modelLabels": ["Gemini 3.1 Pro (High)", "Gemini 3 Flash", "GPT-OSS 120B (Medium)"]}],
+                    }],
+                    "defaultOverrideModelConfig": {"modelOrAlias": {"model": "MODEL_PLACEHOLDER_M37"}},
+                }
+            }
+        }
+        options = extract_model_options_from_user_status(payload)
+        self.assertEqual([item["id"] for item in options], [1037, 1084, 342])
+        self.assertTrue(options[0]["default"])
+
+    def test_model_registry_dynamic_loader_uses_runtime_status(self):
+        payload = {
+            "userStatus": {
+                "cascadeModelConfigData": {
+                    "clientModelConfigs": [
+                        {"label": "Runtime Model", "modelOrAlias": {"model": "MODEL_PLACEHOLDER_M55"}},
+                    ],
+                    "defaultOverrideModelConfig": {"modelOrAlias": {"model": "MODEL_PLACEHOLDER_M55"}},
+                }
+            }
+        }
+        with mock.patch.object(model_registry, "fetch_antigravity_user_status", return_value=payload):
+            options = load_model_options(dynamic=True)
+        self.assertEqual(options, [{"id": 1055, "label": "Runtime Model", "default": True}])
 
     def test_sessions_list_alias_and_group(self):
         for args in (["list"], ["sessions", "list"]):
@@ -98,8 +149,8 @@ class StoreCliTests(unittest.TestCase):
 
     def test_send_alias_and_group(self):
         for args in (
-            ["send", "hello", "--session", "abc", "--model", "1018"],
-            ["chat", "send", "hello", "--session-id", "abc", "--model", "1018"],
+            ["send", "hello", "--session", "abc", "--model", "1037"],
+            ["chat", "send", "hello", "--session-id", "abc", "--model", "1037"],
         ):
             result = self.runner.invoke(store_module.app, args)
             self.assertEqual(result.exit_code, 0)

@@ -45,6 +45,20 @@ class SessionBrowserStoreTests(unittest.TestCase):
             self.assertEqual(sessions[0]["id"], "cache-only-session")
             self.assertTrue(sessions[0]["has_messages"])
 
+    def test_list_sessions_ignores_internal_cache_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conv = root / "conversations"
+            brain = root / "brain"
+            cache = root / "cache"
+            conv.mkdir()
+            brain.mkdir()
+            cache.mkdir()
+            store = AntigravitySessionStore(conversations_dir=conv, brain_dir=brain)
+            store.cache_root = cache
+            (cache / "_pending_uploads").mkdir()
+            self.assertEqual(store.list_sessions(), [])
+
     def test_list_sessions_includes_workspace_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

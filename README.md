@@ -144,22 +144,29 @@ Both the UI and CLI support model selection.
 
 Default model:
 
-- `Gemini 3 Flash`
+- `Gemini 3.1 Pro (High)` (`1037`)
 
-Built-in options:
+When Antigravity is running, `store.py models` reads the same
+`GetUserStatus.userStatus.cascadeModelConfigData.clientModelConfigs` data used
+by the Antigravity model picker.
 
-- `Gemini 3 Flash`
-- `Gemini Pro Low`
-- `Gemini Pro High`
-- `Claude Sonnet`
-- `Claude Opus`
-- `GPT OSS`
+Current fallback options:
+
+- `Gemini 3.1 Pro (High)` (`1037`)
+- `Gemini 3.1 Pro (Low)` (`1036`)
+- `Gemini 3 Flash` (`1084`)
+- `Claude Sonnet 4.6 (Thinking)` (`1035`)
+- `Claude Opus 4.6 (Thinking)` (`1026`)
+- `GPT-OSS 120B (Medium)` (`342`)
+
+Override options with `ANTIGRAVITY_MODELS_JSON` or
+`~/.config/antigravity-cli/models.json` when Antigravity rotates model ids.
 
 CLI examples:
 
 ```bash
-python3 store.py send "hello" --model 1018
-python3 store.py resume --session <id> "continue" --model 1154
+python3 store.py send "hello" --model 1037
+python3 store.py resume --session <id> "continue" --model 1084
 ```
 
 ## Attachment Flow

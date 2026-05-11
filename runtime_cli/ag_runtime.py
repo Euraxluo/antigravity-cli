@@ -17,7 +17,10 @@ from pathlib import Path
 from typing import Any, List, Optional, Sequence, TextIO, Tuple
 
 
-DEFAULT_MODEL_ID = 1018
+try:
+    from .model_registry import DEFAULT_MODEL_ID, load_model_options
+except ImportError:
+    from model_registry import DEFAULT_MODEL_ID, load_model_options
 
 
 @dataclass(frozen=True)
@@ -440,6 +443,11 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--poll", type=float, default=0.5, help="Polling interval in seconds")
     resume.add_argument("--model", type=int, default=DEFAULT_MODEL_ID, help="Requested model id")
     resume.set_defaults(func=_run_resume)
+
+    models = sub.add_parser("models", help="List Antigravity UI model options")
+    models.add_argument("--fallback", action="store_true", help="Skip live Antigravity lookup and print fallback/config options")
+    models.add_argument("--launch-runtime", action="store_true", help="Launch Antigravity if no language server is running")
+    models.set_defaults(func=_run_models)
     return parser
 
 
@@ -481,6 +489,12 @@ def _run_resume(args: argparse.Namespace) -> int:
     text = collector.collect(args.session, baseline_step_count=baseline)
     if not text:
         raise RuntimeError("No assistant output observed before timeout")
+    return 0
+
+
+def _run_models(args: argparse.Namespace) -> int:
+    options = load_model_options(dynamic=not args.fallback, launch=args.launch_runtime)
+    print(json.dumps(options, ensure_ascii=False))
     return 0
 
 

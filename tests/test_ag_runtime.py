@@ -8,7 +8,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from runtime_cli.ag_runtime import AnswerCollector, RuntimeLocator, RuntimeRpcClient
+from runtime_cli.ag_runtime import AnswerCollector, DEFAULT_MODEL_ID, RuntimeLocator, RuntimeRpcClient
 
 
 class RuntimeLocatorTests(unittest.TestCase):
@@ -58,11 +58,18 @@ class RuntimeLocatorTests(unittest.TestCase):
 
 
 class RuntimeRpcClientTests(unittest.TestCase):
+    def test_default_model_id_is_current_antigravity_selection(self) -> None:
+        self.assertEqual(DEFAULT_MODEL_ID, 1037)
+
     def test_build_send_payload(self) -> None:
         payload = RuntimeRpcClient.build_send_payload("cascade-1", "hello", model=7)
         self.assertEqual(payload["cascadeId"], "cascade-1")
         self.assertEqual(payload["items"][0]["text"], "hello")
         self.assertEqual(payload["cascadeConfig"]["plannerConfig"]["requestedModel"]["model"], 7)
+
+    def test_build_send_payload_defaults_to_gemini_3_1_pro_high(self) -> None:
+        payload = RuntimeRpcClient.build_send_payload("cascade-1", "hello")
+        self.assertEqual(payload["cascadeConfig"]["plannerConfig"]["requestedModel"]["model"], 1037)
 
 
 class AnswerCollectorTests(unittest.TestCase):

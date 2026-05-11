@@ -22,6 +22,7 @@ import typer
 
 
 from runtime_cli.ag_runtime import AnswerCollector, RuntimeLocator, RuntimeRpcClient
+from runtime_cli.model_registry import DEFAULT_MODEL_ID, load_model_options
 
 app = typer.Typer(help="Session browser / Antigravity runtime CLI")
 sessions_app = typer.Typer(help="Session read operations")
@@ -32,17 +33,6 @@ app.add_typer(sessions_app, name="sessions")
 app.add_typer(chat_app, name="chat")
 app.add_typer(attachment_app, name="attachment")
 app.add_typer(cache_app, name="cache")
-
-MODEL_OPTIONS = [
-    {"id": 1018, "label": "Gemini 3 Flash", "default": True},
-    {"id": 1164, "label": "Gemini Pro Low"},
-    {"id": 1165, "label": "Gemini Pro High"},
-    {"id": 1163, "label": "Claude Sonnet"},
-    {"id": 1154, "label": "Claude Opus"},
-    {"id": 342, "label": "GPT OSS"},
-]
-DEFAULT_MODEL_ID = 1018
-
 
 @dataclass
 class SessionSummary:
@@ -373,6 +363,8 @@ class AntigravitySessionStore:
             if not cache_dir.is_dir():
                 continue
             session_id = cache_dir.name
+            if session_id.startswith("_"):
+                continue
             if session_id in session_ids:
                 continue
             sessions.append(
@@ -943,7 +935,7 @@ def sessions_messages(session_id: str, refresh: bool = False) -> None:
 
 @app.command("models")
 def list_models() -> None:
-    _json_print(MODEL_OPTIONS)
+    _json_print(load_model_options(dynamic=True))
 
 
 @attachment_app.command("bytes")

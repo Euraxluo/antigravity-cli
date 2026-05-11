@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from store import AntigravitySessionStore
+from runtime_cli.model_registry import DEFAULT_MODEL_ID
 
 
 class SessionUICLIClient:
@@ -73,7 +74,7 @@ class SessionUICLIClient:
             "--poll",
             str(float(payload.get("poll") or 0.5)),
             "--model",
-            str(int(payload.get("model") or 1018)),
+            str(int(payload.get("model") or DEFAULT_MODEL_ID)),
         ]
         if payload.get("session_id"):
             args += ["--session-id", str(payload["session_id"])]
@@ -93,7 +94,7 @@ class SessionUICLIClient:
             "--poll",
             str(float(payload.get("poll") or 0.5)),
             "--model",
-            str(int(payload.get("model") or 1018)),
+            str(int(payload.get("model") or DEFAULT_MODEL_ID)),
         ]
         for path in attachment_paths:
             args += ["--attachment", str(path)]
@@ -113,7 +114,7 @@ class SessionUICLIClient:
             "--poll",
             str(float(payload.get("poll") or 0.5)),
             "--model",
-            str(int(payload.get("model") or 1018)),
+            str(int(payload.get("model") or DEFAULT_MODEL_ID)),
         ]
         if payload.get("session_id"):
             args += ["--session-id", str(payload["session_id"])]
@@ -741,7 +742,7 @@ class SessionUIHandler(BaseHTTPRequestHandler):
           <div id="composer-status" class="status-line">Ready.</div>
           <div class="action-group">
             <select id="model-select" class="model-select" title="Model">
-              <option value="1018">Gemini 3 Flash</option>
+              <option value="1037">Gemini 3.1 Pro (High)</option>
             </select>
             <button id="new-chat-btn" class="btn" type="button" onclick="sendChat(true)">Send as new chat</button>
             <button id="send-btn" class="btn primary" type="button" onclick="sendChat(false)">Send</button>
