@@ -64,7 +64,9 @@ class StoreCliTests(unittest.TestCase):
         self.patcher.stop()
 
     def test_models(self):
-        result = self.runner.invoke(store_module.app, ["models"])
+        models = [{"id": 1037, "label": "Gemini 3.1 Pro (High)", "default": True}]
+        with mock.patch.object(store_module, "load_model_options", return_value=models):
+            result = self.runner.invoke(store_module.app, ["models"])
         self.assertEqual(result.exit_code, 0)
         self.assertIn("Gemini 3.1 Pro (High)", result.stdout)
         self.assertIn('"id": 1037', result.stdout)

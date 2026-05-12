@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""Repo-local launcher for Antigravity CLI."""
+
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+ROOT = Path(__file__).resolve().parent
+VENV_PYTHON = ROOT / ".venv" / "bin" / "python"
+BOOTSTRAP_MARKER = ROOT / ".venv" / ".ag-editable-installed"
+UV_INSTALL_URL = "https://astral.sh/uv/install.sh"
+
+
+def _find_uv() -> Optional[str]:
+    for candidate in (
+        shutil.which("uv"),
+        str(Path.home() / ".local" / "bin" / "uv"),
+        str(Path.home() / ".cargo" / "bin" / "uv"),
+    ):
+        if candidate and Path(candidate).exists():
+            return candidate
+    return None
+
+
+def _install_uv() -> Optional[str]:
+    if os.environ.get("AG_NO_UV_INSTALL"):
+        return None
+    curl = shutil.which("curl")
+    sh = shutil.which("sh")
+    if not curl or not sh:
+        return None
+    sys.stderr.write("[ag bootstrap] installing uv\n")
+    sys.stderr.flush()
+    curl_proc = subprocess.Popen([curl, "-LsSf", UV_INSTALL_URL], cwd=str(ROOT), stdout=subprocess.PIPE)
+    assert curl_proc.stdout is not None
+    sh_proc = subprocess.run([sh], cwd=str(ROOT), stdin=curl_proc.stdout, check=False)
+    curl_proc.stdout.close()
+    curl_return = curl_proc.wait()
+    if curl_return != 0:
+        raise subprocess.CalledProcessError(curl_return, [curl, "-LsSf", UV_INSTALL_URL])
+    if sh_proc.returncode != 0:
+        raise subprocess.CalledProcessError(sh_proc.returncode, [sh])
+    return _find_uv()
+
+
+def _run(command: List[str]) -> None:
+    subprocess.run(command, cwd=str(ROOT), check=True)
+
+
+def _ensure_environment() -> None:
+    if os.environ.get("AG_NO_BOOTSTRAP"):
+        return
+    uv = _find_uv() or _install_uv()
+    if not uv:
+        return
+    if not VENV_PYTHON.exists():
+        sys.stderr.write("[ag bootstrap] creating .venv with uv\n")
+        sys.stderr.flush()
+        _run([uv, "venv", str(ROOT / ".venv"), "--python", "3.11"])
+    if not BOOTSTRAP_MARKER.exists():
+        sys.stderr.write("[ag bootstrap] installing antigravity-cli editable package\n")
+        sys.stderr.flush()
+        _run([uv, "pip", "install", "-e", "."])
+        BOOTSTRAP_MARKER.write_text("ok\n", encoding="utf-8")
+
+
+_ensure_environment()
+if VENV_PYTHON.exists() and Path(sys.executable).resolve() != VENV_PYTHON.resolve():
+    os.execv(str(VENV_PYTHON), [str(VENV_PYTHON), __file__, *sys.argv[1:]])
+
+from ag_cli import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -144,6 +144,7 @@ class SessionBrowserStoreTests(unittest.TestCase):
                 store.send_message("hello", attachment_paths=[pending])
             session_upload = cache / "session-1" / "uploads" / "demo.txt"
             self.assertTrue(session_upload.exists())
+            self.assertTrue(pending.exists())
             files = store.list_session_files("session-1")
             self.assertEqual(files[0]["name"], "demo.txt")
             content = store.get_session_file_content("session-1", "demo.txt")

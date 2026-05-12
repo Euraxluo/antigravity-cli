@@ -1,53 +1,118 @@
-# Antigravity Session Browser
+# Antigravity CLI
 
-`antigravity-session-browser` is a standalone local Antigravity project that can be published and run on its own.
+Antigravity already keeps a rich local trail of conversations, files, model choices, and agent work. This project turns that trail into something you can actually use: a local session browser, a chat composer, a file and image attachment flow, and one terminal command for automation.
 
-It is no longer just a viewer. The repo now includes:
+It is more than a thin wrapper. `ag` gives you a practical control surface for Antigravity:
 
-- local Antigravity session browsing
-- session file and message inspection
-- direct chatting from a local web UI
-- headless runtime `send` / `resume` / `stream`
-- file and image attachments
-- session workspace display
-- streaming assistant output
-- a shared Typer CLI used by both the UI and terminal workflows
+- browse local Antigravity sessions and recovered messages
+- inspect files attached to each session
+- send and resume chats from the terminal
+- stream assistant output as it arrives
+- upload files and images from CLI or web UI
+- switch models using the same model list Antigravity shows in its UI
+- diagnose the language server, cache, and local setup
 
-## Repository Layout
+## UI Preview
+
+The local web UI is the fastest way to understand the project: sessions on the left, files in the middle, and the conversation on the right, with a composer, model picker, attachment button, and send controls.
+
+![Antigravity sessions UI](docs/images/image.png)
+
+![Conversation view with messages](docs/images/image-1.png)
+
+![File and attachment workflow](docs/images/image-2.png)
+
+![Image preview and session browsing](docs/images/image-3.png)
+
+## Quick Start
+
+From a fresh clone, use the repo-local launcher:
+
+```bash
+git clone https://github.com/Euraxluo/antigravity-cli.git
+cd antigravity-cli
+
+./ag doctor
+./ag models
+./ag sessions list
+./ag ui serve --open
+```
+
+For a shell-wide command:
+
+```bash
+./setup-ag.sh
+export PATH="$HOME/.local/bin:$PATH"
+
+ag doctor
+ag models
+ag sessions list
+ag ui serve --open
+```
+
+The launcher bootstraps Python dependencies with `uv`, and can install `uv` automatically when it is missing. You do not need to hand-create a virtualenv for normal use.
+
+## Everyday Commands
+
+```bash
+ag ask "summarize this workspace"
+ag chat stream "use Gemini Flash" --model-label "Gemini 3 Flash"
+ag chat send "continue" --session <session_id>
+
+ag chat send "review this file" --attachment README.md
+ag chat send "look at this screenshot" --attachment docs/images/image.png
+
+ag sessions show <session_id>
+ag sessions files <session_id>
+ag sessions messages <session_id> --refresh
+
+ag ui serve --open
+```
+
+Use `--json` where automation matters:
+
+```bash
+ag doctor --json
+ag models --json
+ag sessions list --json
+```
+
+## Command Map
+
+| Need | Command |
+| --- | --- |
+| Check setup | `ag doctor` |
+| List live UI models | `ag models` |
+| Ask once in a new session | `ag ask "..."` |
+| Send to a session | `ag chat send "..." --session <id>` |
+| Send with a file or image | `ag chat send "..." --attachment <path>` |
+| Stream answer text | `ag chat stream "..."` |
+| Browse sessions | `ag sessions list` |
+| Inspect files/messages | `ag sessions files <id>` / `ag sessions messages <id>` |
+| Open local web UI | `ag ui serve --open` |
+| Low-level language-server calls | `ag runtime send/resume/models` |
+
+## What The Pieces Do
 
 Core files and directories:
 
+- `ag`
+  Repo-local launcher. It works immediately after cloning and can bootstrap dependencies.
+
+- `ag_cli.py`
+  The unified command router for `ag`, `ag-cli`, and `antigravity-cli`.
+
 - `store.py`
-  The main entry point and Typer CLI. It handles:
-  - session listing
-  - session files and file content
-  - message recovery
-  - runtime chat `send` / `resume` / `stream`
-  - attachment reads
-  - cache warmup
+  The shared session and chat backend. It handles session listing, file inspection, message recovery, runtime chat, attachment reads, and cache warmup.
 
 - `ui.py`
-  The local web UI. It handles:
-  - HTTP APIs
-  - invoking the `store.py` CLI
-  - rendering sessions, messages, attachments, and file content
-  - chat input, uploads, model switching, and the image lightbox
+  The local web UI. It renders sessions, messages, attachments, file content, chat input, uploads, model switching, and the image lightbox.
 
 - `runtime_cli/ag_runtime.py`
-  The headless Antigravity runtime transport. It handles:
-  - launching or discovering the Antigravity runtime
-  - ConnectRPC requests
-  - `StartCascade`
-  - `SendUserCascadeMessage`
-  - `GetCascadeTrajectorySteps`
-  - incremental assistant output extraction
+  The headless Antigravity language-server transport for `StartCascade`, `SendUserCascadeMessage`, and trajectory-step recovery.
 
 - `tests/`
-  The repo-local test suite, including:
-  - `test_ag_runtime.py`
-  - `test_runtime_payloads.py`
-  - `test_session_browser_store.py`
-  - `test_store_cli.py`
+  Unit coverage for routing, runtime payloads, model discovery, session storage, attachments, and UI surface checks.
 
 ## Data Sources
 
@@ -55,100 +120,17 @@ By default, the project reads from:
 
 - `~/.gemini/antigravity/conversations`
 - `~/.gemini/antigravity/brain`
-- this repository's own `.cache/`
+- this repository's `.cache/`
 
 Local project state is stored under:
 
 - `.cache/<session_id>/messages.json`
-  The recovered message cache for this project
 - `.cache/<session_id>/steps.json`
-  Cached runtime steps
 - `.cache/<session_id>/uploads/`
-  Session-scoped uploaded files
-
-## Running the Web UI
-
-```bash
-cd /Users/echo/project/antigravity_cli/antigravity-session-browser
-python3 ui.py --host 127.0.0.1 --port 8770
-```
-
-Open:
-
-```text
-http://127.0.0.1:8770/
-```
-
-## Running the CLI
-
-```bash
-cd /Users/echo/project/antigravity_cli/antigravity-session-browser
-python3 store.py --help
-```
-
-## CLI Surface
-
-Top-level commands:
-
-```bash
-python3 store.py models
-python3 store.py list
-python3 store.py files <session_id>
-python3 store.py messages <session_id> --refresh
-python3 store.py show <session_id>
-
-python3 store.py send "hello"
-python3 store.py send "continue" --session <session_id>
-python3 store.py resume --session <session_id> "continue"
-python3 store.py start "first message in a new chat"
-python3 store.py stream "stream a reply"
-```
-
-Grouped commands:
-
-```bash
-python3 store.py sessions list
-python3 store.py sessions files <session_id>
-python3 store.py sessions file-content <session_id> <file_name>
-python3 store.py sessions file-bytes <session_id> <file_name>
-python3 store.py sessions messages <session_id> --refresh
-
-python3 store.py chat send "hello"
-python3 store.py chat start "new chat"
-python3 store.py chat stream "streaming test"
-
-python3 store.py attachment bytes /absolute/path/to/file
-python3 store.py cache warm --limit 20
-```
-
-## Web UI Features
-
-The web UI currently supports:
-
-- a session list on the left
-- workspace display per session
-- a file list in the middle pane
-- rendered messages in the right pane
-- new-chat sending
-- resume sending
-- file and image selection before sending
-- image thumbnail previews before sending
-- click-to-expand image messages
-- Markdown rendering
-- Markdown table rendering
-- model switching
 
 ## Model Selection
 
-Both the UI and CLI support model selection.
-
-Default model:
-
-- `Gemini 3.1 Pro (High)` (`1037`)
-
-When Antigravity is running, `store.py models` reads the same
-`GetUserStatus.userStatus.cascadeModelConfigData.clientModelConfigs` data used
-by the Antigravity model picker.
+`ag models` reads the same `GetUserStatus.userStatus.cascadeModelConfigData.clientModelConfigs` payload used by Antigravity's UI model picker.
 
 Current fallback options:
 
@@ -159,31 +141,25 @@ Current fallback options:
 - `Claude Opus 4.6 (Thinking)` (`1026`)
 - `GPT-OSS 120B (Medium)` (`342`)
 
-Override options with `ANTIGRAVITY_MODELS_JSON` or
-`~/.config/antigravity-cli/models.json` when Antigravity rotates model ids.
-
-CLI examples:
+You can select by id or label:
 
 ```bash
-python3 store.py send "hello" --model 1037
-python3 store.py resume --session <id> "continue" --model 1084
+ag chat stream "think carefully" --model 1037
+ag chat stream "quick answer" --model-label "Gemini 3 Flash"
 ```
+
+If Antigravity rotates model ids, override the list with `ANTIGRAVITY_MODELS_JSON` or `~/.config/antigravity-cli/models.json`.
 
 ## Attachment Flow
 
-Uploaded files do not stay only in the browser.
+Files and images can be sent from both CLI and web UI.
 
 The flow is:
 
-1. The UI accepts uploaded files.
-2. Files are first written to `.cache/_pending_uploads/...`.
-3. After a session id is created or resolved, files are moved to:
-
-```text
-.cache/<session_id>/uploads/...
-```
-
-4. Files are sent to the Antigravity runtime as attachment items:
+1. The CLI or UI receives a file path or upload.
+2. The file is copied into `.cache/<session_id>/uploads/`.
+3. The original source file stays in place.
+4. The runtime receives the attachment as a file item:
 
 ```json
 {
@@ -198,18 +174,8 @@ The flow is:
 As a result:
 
 - uploaded files appear in the current session file list
-- chat messages in the UI also store attachment metadata
-
-## Workspace Resolution
-
-Session workspaces are not inferred only from free text anymore.
-
-The project first prefers authoritative runtime data from:
-
-- `GetAllCascadeTrajectories`
-- `trajectorySummaries[session_id].workspaces[]`
-
-Only when runtime workspace data is unavailable does it fall back to message or artifact path hints.
+- chat messages store attachment metadata
+- image attachments render in the web UI and can be opened in the lightbox
 
 ## Streaming
 
@@ -221,76 +187,30 @@ Chat streaming uses NDJSON events:
 
 The UI reads `/api/chat/stream` incrementally and updates the conversation view live.
 
-## Tests
+## Docs
 
-The test suite now lives entirely inside this repository under `tests/`.
+- [Install and bootstrap](docs/install.md)
+- [CLI reference](docs/cli.md)
+- [Troubleshooting](docs/troubleshooting.md)
 
-Run:
-
-```bash
-cd /Users/echo/project/antigravity_cli/antigravity-session-browser
-python3 -m unittest discover -s tests -p 'test_*.py'
-```
-
-Syntax check:
+Legacy entrypoints still work for compatibility:
 
 ```bash
-python3 -m py_compile store.py ui.py runtime_cli/ag_runtime.py tests/test_*.py
+python3 store.py --help
+python3 ui.py --help
+python3 runtime_cli/ag_runtime.py --help
 ```
 
-## Verified So Far
+## Verified
 
-The project has already been verified against these behaviors:
+The project has been verified against these behaviors:
 
-- session uploads are archived under the owning `session_id`
-- the new-chat button switches to the new session immediately
-- `/api/chat/stream` returns `session -> delta -> done`
-- UI chatting works
-- file upload works
-- image upload works
-- image lightbox works
-- Markdown table rendering works
-- top-level Typer CLI commands work
-
-## What to Commit
-
-Because this is now a standalone repository, the expected commit set is:
-
-- `store.py`
-- `ui.py`
-- `runtime_cli/`
-- `tests/`
-- `README.md`
-- `.gitignore`
-
-Do not commit:
-
-- `.cache/`
-- `.omx/`
-- `__pycache__/`
-
-## Development Rules
-
-- Keep this repository self-contained and avoid depending on parent-directory implementations.
-- Route the UI through the CLI adapter layer instead of bypassing the CLI.
-- Reuse `runtime_cli/ag_runtime.py` for runtime transport concerns.
-- For local data that belongs to one session, prefer `.cache/<session_id>/...`.
-
-
-
-## UI
-
-![alt text](image.png)
-
-![alt text](image-1.png)
-
-![alt text](image-2.png)
-
-![alt text](image-3.png)
-
-
-## Potential Bugs:
-
-There might still be some minor bugs, but overall, this project seems like a great starting point for handling a variety of session-based tasks in Antigravity.
-
-If you need any help or further guidance on this project, feel free to ask!
+- `ag` / `ag-cli` / `antigravity-cli` launch correctly
+- dynamic model discovery returns the current Antigravity UI model list
+- CLI plain messages return assistant output
+- CLI file and image attachments are copied, sent, and recoverable
+- UI multipart chat stream returns `session -> delta -> done`
+- session file and message inspection works
+- cache warmup works
+- `ag doctor` reports runtime and cache failures honestly
+- `python -m unittest discover -s tests` passes

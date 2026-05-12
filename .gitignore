@@ -1,6 +1,9 @@
 .cache/
 .omx/
+.venv/
+*.egg-info/
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
 .DS_Store
 dist/

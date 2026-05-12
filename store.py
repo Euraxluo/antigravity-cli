@@ -8,6 +8,7 @@ import io
 import mimetypes
 import json
 import re
+import shutil
 import ssl
 import subprocess
 import sys
@@ -516,7 +517,7 @@ class AntigravitySessionStore:
         while target.exists():
             target = target_dir / f"{source.stem}_{counter}{source.suffix}"
             counter += 1
-        source.replace(target)
+        shutil.copy2(source, target)
         return target
 
     def get_attachment_bytes(self, path_str: str) -> Dict[str, Any]:
