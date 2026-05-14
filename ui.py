@@ -6,6 +6,7 @@ import argparse
 import base64
 import cgi
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -20,9 +21,10 @@ from runtime_cli.model_registry import DEFAULT_MODEL_ID
 
 
 class SessionUICLIClient:
-    def __init__(self) -> None:
+    def __init__(self, workspace_root: Optional[Path] = None) -> None:
         self.store_script = Path(__file__).resolve().with_name("store.py")
         self.python = sys.executable
+        self.workspace_root = workspace_root or Path(os.environ.get("AG_WORKSPACE", Path.cwd())).expanduser().resolve()
 
     def _run_json(self, args: list[str]) -> Any:
         proc = subprocess.run(
@@ -31,6 +33,7 @@ class SessionUICLIClient:
             stderr=subprocess.PIPE,
             text=True,
             check=False,
+            env={**os.environ, "AG_WORKSPACE": str(self.workspace_root)},
         )
         if proc.returncode != 0:
             raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or f"store CLI failed: {' '.join(args)}")
@@ -120,7 +123,13 @@ class SessionUICLIClient:
             args += ["--session-id", str(payload["session_id"])]
         for path in attachment_paths:
             args += ["--attachment", str(path)]
-        proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={**os.environ, "AG_WORKSPACE": str(self.workspace_root)},
+        )
         return proc
 
 
@@ -261,6 +270,12 @@ class SessionUIHandler(BaseHTTPRequestHandler):
                     if line.strip():
                         self.wfile.write(line.encode("utf-8"))
                         self.wfile.flush()
+                stderr = ""
+                if proc.stderr is not None:
+                    stderr = proc.stderr.read().strip()
+                code = proc.wait()
+                if code != 0:
+                    self._write_stream_event({"type": "error", "error": stderr or f"chat stream exited with status {code}"})
                 return
 
             if parsed.path == "/api/chat/send":
@@ -1249,6 +1264,14 @@ class SessionUIHandler(BaseHTTPRequestHandler):
               history.replaceState(null, '', `/#${event.session_id}`);
               setStatus(`Reply received · ${event.session_id}`);
             }
+
+            if (event.type === 'error') {
+              if (event.messages) {
+                state.messages = event.messages;
+                await renderConversation();
+              }
+              setStatus(event.error || 'Chat stream failed', true);
+            }
           }
         }
       } catch (err) {
@@ -1311,8 +1334,9 @@ class SessionUIHandler(BaseHTTPRequestHandler):
 
 
 class SessionUIApp:
-    def __init__(self, store: Optional[SessionUICLIClient] = None) -> None:
-        self.store = store or SessionUICLIClient()
+    def __init__(self, store: Optional[SessionUICLIClient] = None, workspace_root: Optional[Path] = None) -> None:
+        self.workspace_root = workspace_root or Path(os.environ.get("AG_WORKSPACE", Path.cwd())).expanduser().resolve()
+        self.store = store or SessionUICLIClient(self.workspace_root)
 
     def warm_messages_in_background(self) -> None:
         def _runner() -> None:
@@ -1323,7 +1347,7 @@ class SessionUIApp:
 
     def serve(self, host: str = "127.0.0.1", port: int = 8766, open_browser: bool = True) -> None:
         SessionUIHandler.store = self.store
-        SessionUIHandler.uploader = AntigravitySessionStore()
+        SessionUIHandler.uploader = AntigravitySessionStore(workspace_root=self.workspace_root)
         server = ThreadingHTTPServer((host, port), SessionUIHandler)
         url = f"http://{host}:{port}/"
         self.warm_messages_in_background()
@@ -1346,7 +1370,10 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8766)
     parser.add_argument("--open", action="store_true")
+    parser.add_argument("--workspace")
     args = parser.parse_args()
+    if args.workspace:
+        os.environ["AG_WORKSPACE"] = str(Path(args.workspace).expanduser().resolve())
     SessionUIApp().serve(host=args.host, port=args.port, open_browser=args.open)
     return 0
 

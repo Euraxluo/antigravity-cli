@@ -1,3 +1,4 @@
+import os
 import sys
 import tempfile
 import unittest
@@ -13,6 +14,18 @@ from store import AntigravitySessionStore
 
 
 class SessionBrowserStoreTests(unittest.TestCase):
+    def test_store_defaults_workspace_root_to_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = Path(tmp)
+            original = Path.cwd()
+            try:
+                os.chdir(cwd)
+                with mock.patch.dict(os.environ, {}, clear=True):
+                    store = AntigravitySessionStore()
+            finally:
+                os.chdir(original)
+        self.assertEqual(store.workspace_root, cwd.resolve())
+
     def test_steps_to_messages_uses_modified_response_and_error_message(self) -> None:
         steps = [
             {"type": "CORTEX_STEP_TYPE_USER_INPUT", "metadata": {}, "userInput": {"userResponse": "hello"}},
@@ -187,6 +200,57 @@ class SessionBrowserStoreTests(unittest.TestCase):
             self.assertTrue(result["created"])
             self.assertEqual(result["messages"][0]["role"], "user")
             thread_cls.assert_called_once()
+
+    def test_send_message_raises_when_session_stalls_without_assistant_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conv = root / "conversations"
+            brain = root / "brain"
+            cache = root / "cache"
+            conv.mkdir()
+            brain.mkdir()
+            cache.mkdir()
+            store = AntigravitySessionStore(conversations_dir=conv, brain_dir=brain)
+            store.cache_root = cache
+            fake_locator = mock.Mock()
+            fake_locator.discover.return_value = object()
+            fake_client = mock.Mock()
+            fake_client.get_trajectory_steps.return_value = [
+                {
+                    "type": "CORTEX_STEP_TYPE_USER_INPUT",
+                    "metadata": {"sourceTrajectoryStepInfo": {"stepIndex": 1}},
+                    "userInput": {"userResponse": "hello"},
+                }
+            ]
+            fake_collector = mock.Mock()
+            fake_collector.capture_baseline.return_value = 0
+            fake_collector.collect.return_value = ""
+            with mock.patch.object(session_store_module, "RuntimeLocator", return_value=fake_locator), \
+                 mock.patch.object(session_store_module, "RuntimeRpcClient", return_value=fake_client), \
+                 mock.patch.object(session_store_module, "AnswerCollector", return_value=fake_collector):
+                with self.assertRaisesRegex(RuntimeError, "No assistant output observed before timeout"):
+                    store.send_message("hello", session_id="stalled-session")
+
+    def test_runtime_workspace_root_prefers_cached_session_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            conv = root / "conversations"
+            brain = root / "brain"
+            cache = root / "cache"
+            workspace = root / "workspace"
+            conv.mkdir()
+            brain.mkdir()
+            cache.mkdir()
+            workspace.mkdir()
+            store = AntigravitySessionStore(conversations_dir=conv, brain_dir=brain, workspace_root=root / "default-workspace")
+            store.cache_root = cache
+            session_cache = cache / "session-with-workspace"
+            session_cache.mkdir()
+            (session_cache / "messages.json").write_text(
+                f'[{{"role":"user","content":"@[{workspace}]\\\\nhello"}}]',
+                encoding="utf-8",
+            )
+            self.assertEqual(store._runtime_workspace_root("session-with-workspace"), workspace.resolve())
 
 
 if __name__ == "__main__":

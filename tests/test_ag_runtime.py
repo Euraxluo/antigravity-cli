@@ -1,4 +1,5 @@
 import io
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -55,6 +56,24 @@ class RuntimeLocatorTests(unittest.TestCase):
         self.assertEqual(conn.port, 3001)
         self.assertTrue(conn.use_tls)
         self.assertEqual(conn.csrf_token, "abc")
+
+    def test_env_workspace_overrides_constructor_default(self) -> None:
+        with mock.patch.dict(os.environ, {"AG_WORKSPACE": "/tmp/from-env"}, clear=False):
+            locator = RuntimeLocator(Path("/tmp/from-arg"))
+        self.assertEqual(locator.cwd, Path("/tmp/from-env").resolve())
+
+    def test_discover_skips_hint_matched_candidate_without_ports(self) -> None:
+        locator = RuntimeLocator(Path("/tmp/sub2api"))
+        rows = [
+            (123, "language_server --workspace_id sub2api --csrf_token abc --extension_server_port 3000"),
+            (456, "language_server --enable_lsp --csrf_token def --extension_server_port 4000"),
+        ]
+        with mock.patch.object(locator, "_process_rows", return_value=rows), \
+             mock.patch.object(locator, "_listening_ports", side_effect=[[], [4000, 4001]]), \
+             mock.patch.object(locator, "_find_connect_port", return_value=(4001, True)):
+            conn = locator.discover()
+        self.assertEqual(conn.pid, 456)
+        self.assertEqual(conn.port, 4001)
 
 
 class RuntimeRpcClientTests(unittest.TestCase):

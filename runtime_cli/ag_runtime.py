@@ -34,7 +34,9 @@ class RuntimeConnection:
 
 class RuntimeLocator:
     def __init__(self, cwd: Optional[Path] = None) -> None:
-        self.cwd = (cwd or Path.cwd()).resolve()
+        env_cwd = os.environ.get("AG_WORKSPACE", "").strip()
+        base = Path(env_cwd).expanduser() if env_cwd else (cwd or Path.cwd())
+        self.cwd = base.resolve()
 
     def discover(self) -> RuntimeConnection:
         rows = self._process_rows()
@@ -46,25 +48,38 @@ class RuntimeLocator:
                 "No live Antigravity language_server process found after launching `antigravity -n`."
             )
 
-        pid, args = self._select_process(rows, self._workspace_hints())
-        csrf_token = self._extract_arg(args, "csrf_token")
-        if not csrf_token:
-            raise RuntimeError(f"Failed to extract --csrf_token from language_server pid {pid}")
+        errors: List[str] = []
+        for pid, args in self._ordered_process_candidates(rows, self._workspace_hints()):
+            csrf_token = self._extract_arg(args, "csrf_token")
+            if not csrf_token:
+                errors.append(f"pid {pid}: missing csrf token")
+                continue
 
-        ext_port_raw = self._extract_arg(args, "extension_server_port")
-        extension_server_port = int(ext_port_raw) if ext_port_raw and ext_port_raw.isdigit() else 0
+            ext_port_raw = self._extract_arg(args, "extension_server_port")
+            extension_server_port = int(ext_port_raw) if ext_port_raw and ext_port_raw.isdigit() else 0
 
-        ports = self._listening_ports(pid)
-        if not ports:
-            raise RuntimeError(f"language_server pid {pid} has no listening TCP ports")
+            ports = self._listening_ports(pid)
+            if not ports:
+                errors.append(f"pid {pid}: no listening TCP ports")
+                continue
 
-        port, use_tls = self._find_connect_port(ports, extension_server_port)
-        return RuntimeConnection(
-            pid=pid,
-            port=port,
-            use_tls=use_tls,
-            csrf_token=csrf_token,
-            extension_server_port=extension_server_port,
+            try:
+                port, use_tls = self._find_connect_port(ports, extension_server_port)
+            except Exception as exc:
+                errors.append(f"pid {pid}: {exc}")
+                continue
+
+            return RuntimeConnection(
+                pid=pid,
+                port=port,
+                use_tls=use_tls,
+                csrf_token=csrf_token,
+                extension_server_port=extension_server_port,
+            )
+
+        raise RuntimeError(
+            "Failed to discover a working language_server process. "
+            + "; ".join(errors[:8])
         )
 
     def _wait_for_process_rows(self, timeout: float = 40.0, poll: float = 0.5) -> List[Tuple[int, str]]:
@@ -142,6 +157,22 @@ class RuntimeLocator:
                 if hint in args.lower():
                     return pid, args
         return rows[-1]
+
+    @staticmethod
+    def _ordered_process_candidates(rows: Sequence[Tuple[int, str]], hints: Sequence[str]) -> List[Tuple[int, str]]:
+        if not rows:
+            return []
+        lowered_hints = [hint.lower() for hint in hints if hint]
+        preferred: List[Tuple[int, str]] = []
+        fallback: List[Tuple[int, str]] = []
+        for row in rows:
+            pid, args = row
+            text = args.lower()
+            if any(hint in text for hint in lowered_hints):
+                preferred.append(row)
+            else:
+                fallback.append(row)
+        return preferred + fallback
 
     @staticmethod
     def _extract_arg(cmdline: str, name: str) -> Optional[str]:

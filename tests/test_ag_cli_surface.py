@@ -207,6 +207,27 @@ class AgCliSurfaceTests(unittest.TestCase):
         self.assertEqual(stdout, "")
         self.assertEqual(passthrough.call_args.args[0][:3], ["stream", "hello", "--session"])
 
+    def test_workspace_option_sets_environment_for_models(self):
+        captured = {}
+
+        def fake_load_models(*, launch_runtime=False):
+            captured["workspace"] = os.environ.get("AG_WORKSPACE")
+            return [{"id": 2048, "label": "Runtime Model", "default": True}]
+
+        with mock.patch.object(ag_cli, "load_models", side_effect=fake_load_models):
+            code, stdout, stderr = run_ag(["models", "--workspace", "/tmp/demo-workspace"])
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual(captured["workspace"], str(Path("/tmp/demo-workspace").resolve()))
+
+    def test_ui_serve_workspace_flows_to_ui_process(self):
+        with mock.patch.object(ag_cli, "python_with_module", return_value="/python"), \
+             mock.patch.object(ag_cli, "run_passthrough", return_value=0) as passthrough:
+            code, stdout, stderr = run_ag(["ui", "serve", "--workspace", "/tmp/demo-workspace"])
+        self.assertEqual(code, 0, stderr)
+        command = passthrough.call_args.args[0]
+        self.assertIn("--workspace", command)
+        self.assertIn(str(Path("/tmp/demo-workspace").resolve()), command)
+
     def test_runtime_and_ui_serve_route_to_existing_modules(self):
         scenarios = [
             ["runtime", "models", "--fallback"],

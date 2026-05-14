@@ -30,6 +30,11 @@ class SessionUISurfaceTests(unittest.TestCase):
         self.assertNotIn("pb inspect", html)
         self.assertNotIn("_pb_inspect.json", html)
 
+    def test_main_ui_handles_stream_error_events(self) -> None:
+        html = SessionUIHandler._html(SessionUIHandler)
+        self.assertIn("if (event.type === 'error')", html)
+        self.assertIn("setStatus(event.error || 'Chat stream failed', true);", html)
+
 
 if __name__ == "__main__":
     unittest.main()

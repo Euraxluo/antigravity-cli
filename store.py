@@ -7,6 +7,7 @@ import base64
 import io
 import mimetypes
 import json
+import os
 import re
 import shutil
 import ssl
@@ -71,13 +72,29 @@ class AntigravitySessionStore:
         self,
         conversations_dir: Optional[Path] = None,
         brain_dir: Optional[Path] = None,
+        workspace_root: Optional[Path] = None,
     ) -> None:
         home = Path.home()
         self.repo_root = Path(__file__).resolve().parent
+        self.workspace_root = self._resolve_workspace_root(workspace_root)
         self.cache_root = self.repo_root / ".cache"
         self.cache_root.mkdir(parents=True, exist_ok=True)
         self.conversations_dir = conversations_dir or home / ".gemini" / "antigravity" / "conversations"
         self.brain_dir = brain_dir or home / ".gemini" / "antigravity" / "brain"
+
+    @staticmethod
+    def _resolve_workspace_root(workspace_root: Optional[Path]) -> Path:
+        raw = workspace_root or os.environ.get("AG_WORKSPACE")
+        if raw:
+            return Path(raw).expanduser().resolve()
+        return Path.cwd().resolve()
+
+    def _runtime_workspace_root(self, session_id: Optional[str] = None) -> Path:
+        if session_id:
+            session_workspace = self._cached_session_workspace_path(session_id)
+            if session_workspace:
+                return Path(session_workspace).expanduser().resolve()
+        return self.workspace_root
 
     def get_session_summary(self, session_id: str, fallback_title: Optional[str] = None) -> Dict[str, Any]:
         pb_path = self.conversations_dir / f"{session_id}.pb"
@@ -118,7 +135,7 @@ class AntigravitySessionStore:
         if not prompt and not paths:
             raise ValueError("message or attachment is required")
 
-        locator = RuntimeLocator(self.repo_root)
+        locator = RuntimeLocator(self._runtime_workspace_root(session_id))
         connection = locator.discover()
         client = RuntimeRpcClient(connection)
         stream = io.StringIO()
@@ -139,6 +156,14 @@ class AntigravitySessionStore:
         baseline = collector.capture_baseline(session_id)
         client.send_user_message(session_id, prompt, model=model, attachment_paths=paths)
         answer = collector.collect(session_id, baseline_step_count=baseline).strip()
+        stalled_error = self._stalled_session_error(
+            client,
+            session_id,
+            baseline_step_count=baseline,
+            assistant_text=answer,
+        )
+        if stalled_error:
+            raise RuntimeError(stalled_error)
         messages = self.get_session_messages(session_id, force_refresh=True)
 
         return {
@@ -164,7 +189,7 @@ class AntigravitySessionStore:
         if not prompt and not paths:
             raise ValueError("message or attachment is required")
 
-        locator = RuntimeLocator(self.repo_root)
+        locator = RuntimeLocator(self.workspace_root)
         connection = locator.discover()
         client = RuntimeRpcClient(connection)
         session_id = client.start_cascade()
@@ -221,7 +246,7 @@ class AntigravitySessionStore:
         if not prompt and not paths:
             raise ValueError("message or attachment is required")
 
-        locator = RuntimeLocator(self.repo_root)
+        locator = RuntimeLocator(self._runtime_workspace_root(session_id))
         connection = locator.discover()
         client = RuntimeRpcClient(connection)
         collector = AnswerCollector(
@@ -276,6 +301,21 @@ class AntigravitySessionStore:
                 continue
 
             messages = self.get_session_messages(session_id, force_refresh=True)
+            stalled_error = self._stalled_session_error(
+                client,
+                session_id,
+                baseline_step_count=baseline,
+                assistant_text=assistant_text,
+            )
+            if stalled_error:
+                yield {
+                    "type": "error",
+                    "session_id": session_id,
+                    "error": stalled_error,
+                    "messages": messages,
+                    "session": self.get_session_summary(session_id, fallback_title=prompt),
+                }
+                return
             yield {
                 "type": "done",
                 "session_id": session_id,
@@ -283,6 +323,28 @@ class AntigravitySessionStore:
                 "messages": messages,
                 "session": self.get_session_summary(session_id, fallback_title=prompt),
             }
+
+    def _stalled_session_error(
+        self,
+        client: RuntimeRpcClient,
+        session_id: str,
+        *,
+        baseline_step_count: int,
+        assistant_text: str,
+    ) -> Optional[str]:
+        if assistant_text:
+            return None
+
+        steps = client.get_trajectory_steps(session_id)
+        new_messages = self._steps_to_messages(steps[baseline_step_count:])
+        if any(message.get("role") == "assistant" for message in new_messages):
+            return None
+
+        return (
+            "No assistant output observed before timeout. "
+            "This session may be stuck or partially recovered after a server restart. "
+            "Try Send as new chat to continue in a fresh session."
+        )
 
     def save_uploaded_file(self, filename: str, fileobj: BinaryIO) -> Path:
         safe_name = Path(filename or "upload.bin").name or "upload.bin"
@@ -388,8 +450,12 @@ class AntigravitySessionStore:
         if session_id in workspace_map:
             return workspace_map[session_id]
 
+        return self._cached_session_workspace_path(session_id)
+
+    def _cached_session_workspace_path(self, session_id: str) -> Optional[str]:
         # 1. Try to infer from transcript cache.
-        messages = self.get_session_messages(session_id)
+        cache_path = self._messages_cache_path(session_id)
+        messages = self._read_json(cache_path) if cache_path.exists() else []
         for msg in messages:
             content = str(msg.get("content") or "")
             for line in content.splitlines():
@@ -663,7 +729,7 @@ class AntigravitySessionStore:
     def _write_json(self, path: Path, payload: Any) -> None:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def _discover_live_ls_connection(self) -> Dict[str, Any]:
+    def _discover_live_ls_connection(self, workspace_root: Optional[Path] = None) -> Dict[str, Any]:
         proc = subprocess.run(["ps", "-eo", "pid,args"], stdout=subprocess.PIPE, text=True, check=False)
         rows = []
         for line in proc.stdout.splitlines():
@@ -676,7 +742,7 @@ class AntigravitySessionStore:
         if not rows:
             return {"error": "no live language server found"}
 
-        pid, args = self._select_process_row(rows)
+        pid, args = self._select_process_row(rows, workspace_root=workspace_root)
         csrf_match = re.search(r"--csrf_token\s+([0-9a-fA-F-]+)", args)
         if not csrf_match:
             return {"error": f"csrf token missing for pid {pid}"}
@@ -702,17 +768,20 @@ class AntigravitySessionStore:
             "ports": sorted(set(ports)),
         }
 
-    def _select_process_row(self, rows: List[tuple[int, str]]) -> tuple[int, str]:
-        hints = self._workspace_hints()
+    def _select_process_row(self, rows: List[tuple[int, str]], workspace_root: Optional[Path] = None) -> tuple[int, str]:
+        hints = self._workspace_hints(workspace_root=workspace_root)
         for hint in hints:
             for pid, args in rows:
                 if hint in args.lower():
                     return pid, args
         return rows[-1]
 
-    def _workspace_hints(self) -> List[str]:
-        parts = [part for part in self.repo_root.resolve().parts if part and part != "/"]
+    def _workspace_hints(self, workspace_root: Optional[Path] = None) -> List[str]:
+        env_hint = os.environ.get("AG_RUNTIME_WORKSPACE_HINT", "").strip().lower()
+        parts = [part for part in (workspace_root or self.workspace_root).resolve().parts if part and part != "/"]
         hints: List[str] = []
+        if env_hint:
+            hints.append(env_hint)
         if parts:
             hints.append(parts[-1].replace("-", "_").replace(".", "_").lower())
         if len(parts) >= 2:
@@ -724,15 +793,16 @@ class AntigravitySessionStore:
             hints.append(full)
         return list(dict.fromkeys(hints))
 
-    def _ensure_live_ls_connection(self, wait_seconds: float = 12.0) -> Dict[str, Any]:
-        conn = self._discover_live_ls_connection()
+    def _ensure_live_ls_connection(self, workspace_root: Optional[Path] = None, wait_seconds: float = 12.0) -> Dict[str, Any]:
+        runtime_root = workspace_root or self.workspace_root
+        conn = self._discover_live_ls_connection(runtime_root)
         if not conn.get("error"):
             return conn
 
         try:
             subprocess.run(
                 ["antigravity", "chat", "-m", "ask", "hello"],
-                cwd=str(self.repo_root),
+                cwd=str(runtime_root),
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -742,17 +812,18 @@ class AntigravitySessionStore:
 
         deadline = time.time() + wait_seconds
         while time.time() < deadline:
-            conn = self._discover_live_ls_connection()
+            conn = self._discover_live_ls_connection(runtime_root)
             if not conn.get("error"):
                 return conn
             time.sleep(1.0)
         return conn
 
-    def _launch_antigravity_for_session(self, session_id: str) -> None:
+    def _launch_antigravity_for_session(self, session_id: str, workspace_root: Optional[Path] = None) -> None:
+        runtime_root = workspace_root or self._runtime_workspace_root(session_id)
         try:
             subprocess.run(
                 ["antigravity", "chat", "-m", "ask", "hello"],
-                cwd=str(self.repo_root),
+                cwd=str(runtime_root),
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -762,10 +833,11 @@ class AntigravitySessionStore:
 
     def _live_ls_rpc(self, method: str, payload: Dict[str, Any]) -> Any:
         session_id = payload.get("cascadeId")
-        conn = self._ensure_live_ls_connection()
+        runtime_root = self._runtime_workspace_root(session_id if isinstance(session_id, str) else None)
+        conn = self._ensure_live_ls_connection(runtime_root)
         if conn.get("error") and isinstance(session_id, str):
-            self._launch_antigravity_for_session(session_id)
-            conn = self._ensure_live_ls_connection(wait_seconds=20.0)
+            self._launch_antigravity_for_session(session_id, runtime_root)
+            conn = self._ensure_live_ls_connection(runtime_root, wait_seconds=20.0)
         if conn.get("error"):
             return conn
 

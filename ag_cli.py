@@ -131,7 +131,24 @@ def fail(message: str, *, json_output: bool = False, code: int = 1) -> int:
 def load_models(*, launch_runtime: bool = False) -> list[dict[str, Any]]:
     from runtime_cli.model_registry import load_model_options
 
-    return load_model_options(dynamic=True, launch=launch_runtime)
+    return load_model_options(dynamic=True, cwd=workspace_root(), launch=launch_runtime)
+
+
+def workspace_root() -> Path:
+    raw = os.environ.get("AG_WORKSPACE")
+    if raw:
+        return Path(raw).expanduser().resolve()
+    return Path.cwd().resolve()
+
+
+def apply_workspace_env(args: argparse.Namespace) -> None:
+    workspace = getattr(args, "workspace", None)
+    if workspace:
+        os.environ["AG_WORKSPACE"] = str(Path(workspace).expanduser().resolve())
+
+
+def add_workspace_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--workspace", help="Workspace directory to target for runtime discovery")
 
 
 def resolve_model_id(args: argparse.Namespace) -> Optional[int]:
@@ -262,7 +279,7 @@ def run_doctor(args: argparse.Namespace) -> int:
         "hint": "Run `./setup-ag.sh` if Typer is missing.",
     }
 
-    locator = RuntimeLocator(REPO_ROOT)
+    locator = RuntimeLocator(workspace_root())
     rows = locator._process_rows()
     checks["antigravity_process"] = {
         "ok": bool(rows),
@@ -491,6 +508,8 @@ def cmd_ui_serve(args: argparse.Namespace) -> int:
     cmd = ["--host", args.host, "--port", str(args.port)]
     if args.open:
         cmd.append("--open")
+    if getattr(args, "workspace", None):
+        cmd += ["--workspace", str(Path(args.workspace).expanduser().resolve())]
     return run_passthrough(session_ui_cmd() + cmd)
 
 
@@ -521,16 +540,19 @@ def build_parser() -> argparse.ArgumentParser:
     ask = sub.add_parser("ask", help="Create a new session and send one message")
     ask.add_argument("message")
     ask.add_argument("--async", dest="async_start", action="store_true", help="Return after creating the session and queueing send")
+    add_workspace_option(ask)
     add_send_options(ask)
     add_json_option(ask)
     ask.set_defaults(func=cmd_ask, session=None)
 
     models = sub.add_parser("models", help="List Antigravity UI model options")
     models.add_argument("--launch-runtime", action="store_true", help="Launch Antigravity if no language server is running")
+    add_workspace_option(models)
     add_json_option(models)
     models.set_defaults(func=cmd_models)
 
     doctor = sub.add_parser("doctor", help="Diagnose Antigravity CLI/runtime setup")
+    add_workspace_option(doctor)
     add_json_option(doctor)
     doctor.set_defaults(func=run_doctor)
 
@@ -539,6 +561,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat_send = chat_sub.add_parser("send", help="Send a message, creating a session when omitted")
     chat_send.add_argument("message")
     chat_send.add_argument("--session", help="Existing session id")
+    add_workspace_option(chat_send)
     add_send_options(chat_send)
     add_json_option(chat_send)
     chat_send.set_defaults(func=cmd_chat_send)
@@ -546,6 +569,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat_resume = chat_sub.add_parser("resume", help="Send to an existing session")
     chat_resume.add_argument("--session", "--chat", dest="session", required=True)
     chat_resume.add_argument("message")
+    add_workspace_option(chat_resume)
     add_send_options(chat_resume)
     add_json_option(chat_resume)
     chat_resume.set_defaults(func=cmd_chat_resume)
@@ -553,6 +577,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat_start = chat_sub.add_parser("start", help="Create a new session and send")
     chat_start.add_argument("message")
     chat_start.add_argument("--async", dest="async_start", action="store_true", help="Return as soon as the session is created")
+    add_workspace_option(chat_start)
     add_send_options(chat_start)
     add_json_option(chat_start)
     chat_start.set_defaults(func=cmd_chat_start, session=None)
@@ -560,6 +585,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat_stream = chat_sub.add_parser("stream", help="Stream chat events or answer text")
     chat_stream.add_argument("message")
     chat_stream.add_argument("--session", help="Existing session id")
+    add_workspace_option(chat_stream)
     add_send_options(chat_stream)
     add_json_option(chat_stream)
     chat_stream.set_defaults(func=cmd_chat_stream)
@@ -567,20 +593,24 @@ def build_parser() -> argparse.ArgumentParser:
     sessions = sub.add_parser("sessions", help="Session read operations")
     sessions_sub = sessions.add_subparsers(dest="sessions_cmd", required=True)
     sessions_list = sessions_sub.add_parser("list", help="List sessions")
+    add_workspace_option(sessions_list)
     add_json_option(sessions_list)
     sessions_list.set_defaults(func=cmd_sessions_list)
     sessions_show = sessions_sub.add_parser("show", help="Show one session")
     sessions_show.add_argument("session_id")
     sessions_show.add_argument("--refresh", action="store_true")
+    add_workspace_option(sessions_show)
     add_json_option(sessions_show)
     sessions_show.set_defaults(func=cmd_sessions_show)
     sessions_files = sessions_sub.add_parser("files", help="List session files")
     sessions_files.add_argument("session_id")
+    add_workspace_option(sessions_files)
     add_json_option(sessions_files)
     sessions_files.set_defaults(func=cmd_sessions_files)
     sessions_messages = sessions_sub.add_parser("messages", help="Show session messages")
     sessions_messages.add_argument("session_id")
     sessions_messages.add_argument("--refresh", action="store_true")
+    add_workspace_option(sessions_messages)
     add_json_option(sessions_messages)
     sessions_messages.set_defaults(func=cmd_sessions_messages)
 
@@ -590,6 +620,7 @@ def build_parser() -> argparse.ArgumentParser:
     ui_serve.add_argument("--host", default="127.0.0.1")
     ui_serve.add_argument("--port", type=int, default=8765)
     ui_serve.add_argument("--open", action="store_true")
+    add_workspace_option(ui_serve)
     ui_serve.set_defaults(func=cmd_ui_serve)
 
     attachments = sub.add_parser("attachments", help="Attachment read operations")
@@ -602,6 +633,7 @@ def build_parser() -> argparse.ArgumentParser:
     cache_sub = cache.add_subparsers(dest="cache_cmd", required=True)
     cache_warm = cache_sub.add_parser("warm", help="Warm session message cache")
     cache_warm.add_argument("--limit", type=int, default=0)
+    add_workspace_option(cache_warm)
     add_json_option(cache_warm)
     cache_warm.set_defaults(func=cmd_cache_warm)
 
@@ -612,6 +644,7 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_send.add_argument("--timeout", type=float, default=60.0)
     runtime_send.add_argument("--idle-seconds", type=float, default=1.5)
     runtime_send.add_argument("--poll", type=float, default=0.5)
+    add_workspace_option(runtime_send)
     add_model_options(runtime_send)
     runtime_send.set_defaults(func=cmd_runtime_passthrough)
     runtime_resume = runtime_sub.add_parser("resume", help="Resume a runtime session")
@@ -620,11 +653,13 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_resume.add_argument("--timeout", type=float, default=60.0)
     runtime_resume.add_argument("--idle-seconds", type=float, default=1.5)
     runtime_resume.add_argument("--poll", type=float, default=0.5)
+    add_workspace_option(runtime_resume)
     add_model_options(runtime_resume)
     runtime_resume.set_defaults(func=cmd_runtime_passthrough)
     runtime_models = runtime_sub.add_parser("models", help="List runtime model options")
     runtime_models.add_argument("--fallback", action="store_true")
     runtime_models.add_argument("--launch-runtime", action="store_true")
+    add_workspace_option(runtime_models)
     runtime_models.set_defaults(func=cmd_runtime_passthrough)
 
     send = sub.add_parser("send", help="Alias for `chat resume`")
@@ -634,6 +669,7 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--idle-seconds", type=float, default=1.5)
     send.add_argument("--poll", type=float, default=0.5)
     send.add_argument("--attachment", action="append", default=[], type=Path)
+    add_workspace_option(send)
     add_model_options(send)
     add_json_option(send)
     send.set_defaults(func=cmd_chat_resume)
@@ -645,6 +681,7 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("--idle-seconds", type=float, default=1.5)
     resume.add_argument("--poll", type=float, default=0.5)
     resume.add_argument("--attachment", action="append", default=[], type=Path)
+    add_workspace_option(resume)
     add_model_options(resume)
     add_json_option(resume)
     resume.set_defaults(func=cmd_chat_resume)
@@ -653,6 +690,7 @@ def build_parser() -> argparse.ArgumentParser:
     webui.add_argument("--host", default="127.0.0.1")
     webui.add_argument("--port", type=int, default=8765)
     webui.add_argument("--open", action="store_true")
+    add_workspace_option(webui)
     webui.set_defaults(func=cmd_ui_serve)
 
     return parser
@@ -661,6 +699,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    apply_workspace_env(args)
     try:
         return int(args.func(args))
     except KeyboardInterrupt:
